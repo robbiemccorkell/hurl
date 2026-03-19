@@ -2,6 +2,10 @@
 name = "hurl"
 version = "0.1.0"
 edition = "2024"
+description = "A terminal UI API client for humans"
+homepage = "https://github.com/robbiemccorkell/hurl"
+repository = "https://github.com/robbiemccorkell/hurl"
+readme = "README.md"
 
 [dependencies]
 anyhow = "1.0"
@@ -19,3 +23,8 @@ uuid = { version = "1.18", features = ["serde", "v4"] }
 [dev-dependencies]
 httpmock = "0.8"
 tempfile = "3.20"
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"

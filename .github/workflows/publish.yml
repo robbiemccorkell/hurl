@@ -1,0 +1,245 @@
+name: Publish
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        required: true
+        type: string
+
+jobs:
+  plan:
+    runs-on: ubuntu-22.04
+    outputs:
+      manifest: ${{ steps.plan.outputs.manifest }}
+      tag: ${{ steps.release.outputs.tag }}
+      tag_flag: ${{ steps.release.outputs.tag_flag }}
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+          submodules: recursive
+      - name: Install dist
+        shell: bash
+        run: curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/download/v0.31.0/cargo-dist-installer.sh | sh
+      - name: Add dist to PATH
+        shell: bash
+        run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - id: release
+        name: Capture release tag
+        shell: bash
+        run: |
+          echo "tag=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+          echo "tag_flag=--tag=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+      - id: plan
+        name: Build release plan
+        shell: bash
+        run: |
+          dist plan ${{ steps.release.outputs.tag_flag }} --output-format=json > plan-dist-manifest.json
+          echo "manifest=$(jq -c "." plan-dist-manifest.json)" >> "$GITHUB_OUTPUT"
+      - name: Upload plan manifest
+        uses: actions/upload-artifact@v4
+        with:
+          name: artifacts-plan-dist-manifest
+          path: plan-dist-manifest.json
+          if-no-files-found: error
+
+  build-local-artifacts:
+    name: build-local-artifacts (${{ join(matrix.targets, ', ') }})
+    needs:
+      - plan
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.plan.outputs.manifest).ci.github.artifacts_matrix }}
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      BUILD_MANIFEST_NAME: target/distrib/${{ join(matrix.targets, '-') }}-dist-manifest.json
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+          submodules: recursive
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ join(matrix.targets, ',') }}
+      - name: Install dist (Unix)
+        if: ${{ !contains(matrix.host, 'windows') }}
+        shell: bash
+        run: ${{ matrix.install_dist.run }}
+      - name: Add dist to PATH (Unix)
+        if: ${{ !contains(matrix.host, 'windows') }}
+        shell: bash
+        run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - name: Install dist (Windows)
+        if: ${{ contains(matrix.host, 'windows') }}
+        shell: pwsh
+        run: ${{ matrix.install_dist.run }}
+      - name: Add dist to PATH (Windows)
+        if: ${{ contains(matrix.host, 'windows') }}
+        shell: pwsh
+        run: '"$HOME/.cargo/bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append'
+      - name: Build local artifacts (Unix)
+        if: ${{ !contains(matrix.host, 'windows') }}
+        shell: bash
+        run: |
+          dist build ${{ needs.plan.outputs.tag_flag }} --print=linkage --output-format=json ${{ matrix.dist_args }} > dist-manifest.json
+          cp dist-manifest.json "$BUILD_MANIFEST_NAME"
+      - name: Build local artifacts (Windows)
+        if: ${{ contains(matrix.host, 'windows') }}
+        shell: pwsh
+        run: |
+          dist build ${{ needs.plan.outputs.tag_flag }} --print=linkage --output-format=json ${{ matrix.dist_args }} > dist-manifest.json
+          Copy-Item dist-manifest.json $env:BUILD_MANIFEST_NAME
+      - name: Upload local artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: artifacts-build-local-${{ join(matrix.targets, '_') }}
+          path: target/distrib/**
+          if-no-files-found: error
+
+  build-global-artifacts:
+    needs:
+      - plan
+      - build-local-artifacts
+    runs-on: ubuntu-22.04
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      BUILD_MANIFEST_NAME: target/distrib/global-dist-manifest.json
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+          submodules: recursive
+      - name: Install dist
+        shell: bash
+        run: curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/download/v0.31.0/cargo-dist-installer.sh | sh
+      - name: Add dist to PATH
+        shell: bash
+        run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - name: Fetch local artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: artifacts-build-local-*
+          path: target/distrib/
+          merge-multiple: true
+      - name: Build global artifacts
+        shell: bash
+        run: |
+          dist build ${{ needs.plan.outputs.tag_flag }} --artifacts=global --output-format=json > dist-manifest.json
+          cp dist-manifest.json "$BUILD_MANIFEST_NAME"
+      - name: Upload global artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: artifacts-build-global
+          path: target/distrib/**
+          if-no-files-found: error
+
+  host:
+    needs:
+      - plan
+      - build-local-artifacts
+      - build-global-artifacts
+    runs-on: ubuntu-22.04
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+          submodules: recursive
+      - name: Install dist
+        shell: bash
+        run: curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/download/v0.31.0/cargo-dist-installer.sh | sh
+      - name: Add dist to PATH
+        shell: bash
+        run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - name: Fetch built artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: artifacts-*
+          path: target/distrib/
+          merge-multiple: true
+      - name: Upload artifacts to the GitHub release
+        shell: bash
+        run: |
+          dist host ${{ needs.plan.outputs.tag_flag }} --steps=upload --steps=release --output-format=json > dist-manifest.json
+          cat dist-manifest.json
+      - name: Upload host manifest
+        uses: actions/upload-artifact@v4
+        with:
+          name: artifacts-dist-manifest
+          path: dist-manifest.json
+          if-no-files-found: error
+      - name: Download release artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: artifacts-*
+          path: artifacts
+          merge-multiple: true
+      - name: Remove dist manifests from upload set
+        shell: bash
+        run: rm -f artifacts/*-dist-manifest.json
+      - name: Upload artifacts to existing GitHub release
+        shell: bash
+        run: gh release upload "${{ needs.plan.outputs.tag }}" artifacts/* --clobber
+
+  publish-homebrew-formula:
+    needs:
+      - plan
+      - host
+    if: ${{ !fromJson(needs.plan.outputs.manifest).announcement_is_prerelease || fromJson(needs.plan.outputs.manifest).publish_prereleases }}
+    runs-on: ubuntu-22.04
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      PLAN: ${{ needs.plan.outputs.manifest }}
+      GITHUB_USER: github-actions[bot]
+      GITHUB_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: true
+          repository: robbiemccorkell/homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+      - name: Fetch generated release artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: artifacts-*
+          path: Formula/
+          merge-multiple: true
+      - name: Commit formula files
+        shell: bash
+        run: |
+          git config --global user.name "${GITHUB_USER}"
+          git config --global user.email "${GITHUB_EMAIL}"
+
+          committed=0
+          for release in $(echo "$PLAN" | jq --compact-output '.releases[] | select([.artifacts[] | endswith(".rb")] | any)'); do
+            filename=$(echo "$release" | jq '.artifacts[] | select(endswith(".rb"))' --raw-output)
+            name=$(echo "$filename" | sed 's/\.rb$//')
+            version=$(echo "$release" | jq .app_version --raw-output)
+
+            if [ -x /home/linuxbrew/.linuxbrew/bin/brew ]; then
+              export PATH="/home/linuxbrew/.linuxbrew/bin:$PATH"
+              brew update
+              brew style --except-cops FormulaAudit/Homepage,FormulaAudit/Desc,FormulaAuditStrict --fix "Formula/${filename}" || true
+            fi
+
+            git add "Formula/${filename}"
+            if git diff --cached --quiet; then
+              echo "No formula changes to commit for ${name} ${version}"
+              continue
+            fi
+
+            git commit -m "${name} ${version}"
+            committed=1
+          done
+
+          if [ "$committed" -eq 1 ]; then
+            git push
+          else
+            echo "No Homebrew formula changes to push"
+          fi

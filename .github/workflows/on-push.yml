@@ -1,0 +1,13 @@
+name: On Push
+
+on:
+  push:
+    branches:
+      - "**"
+    tags-ignore:
+      - "**"
+
+jobs:
+  test:
+    uses: ./.github/workflows/test.yml
+    secrets: inherit

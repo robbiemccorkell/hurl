@@ -58,6 +58,32 @@ If you do not already have Rust installed, the usual path is:
 curl https://sh.rustup.rs -sSf | sh
 ```
 
+## Installation
+
+Prebuilt binaries are intended to be published through GitHub Releases, installer scripts, and Homebrew.
+
+### Homebrew
+
+```bash
+brew install robbiemccorkell/tap/hurl
+```
+
+### macOS and Linux
+
+```bash
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/robbiemccorkell/hurl/releases/latest/download/hurl-installer.sh | sh
+```
+
+### Windows PowerShell
+
+```powershell
+powershell -ExecutionPolicy Bypass -c "irm https://github.com/robbiemccorkell/hurl/releases/latest/download/hurl-installer.ps1 | iex"
+```
+
+### Manual Download
+
+You can also download the appropriate archive for your platform from the GitHub Releases page.
+
 ### Run the App
 
 From the repo root:
@@ -152,3 +178,18 @@ The app is organized into a few small modules:
 - `src/network.rs`: HTTP execution and response formatting
 - `src/storage.rs`: persistent request library
 - `src/model.rs`: request/response data types and validation
+
+## Releasing
+
+Releases are configured with `cargo-dist`.
+
+- Publishing a non-draft GitHub release triggers [`.github/workflows/on-release.yml`](.github/workflows/on-release.yml), which calls the reusable publish workflow in [`.github/workflows/publish.yml`](.github/workflows/publish.yml).
+- The workflow builds platform archives, generates installer scripts, uploads release assets, and updates the Homebrew formula.
+- The Homebrew formula is configured to publish to `robbiemccorkell/homebrew-tap`.
+
+### Maintainer Setup
+
+Before Homebrew publishing will work, the following need to exist:
+
+- a GitHub repository at `robbiemccorkell/homebrew-tap`
+- a `HOMEBREW_TAP_TOKEN` GitHub Actions secret with push access to that tap repo
