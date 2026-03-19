@@ -4,58 +4,12 @@
 
 It is a Rust project that aims to feel like a lightweight, keyboard-driven Postman for the terminal, focused on creating, saving, and sending JSON-oriented HTTP requests from a TUI.
 
-## Features
-
-- Create a request with:
-  - optional title
-  - HTTP method
-  - URL
-  - headers
-  - JSON request body
-- Save requests into a local library
-- Browse saved requests in the library pane
-- Load and submit saved requests
-- View:
-  - status code
-  - response time
-  - response headers
-  - response body
-- Paste into text fields and the JSON body editor
-
-## Tech Stack
-
-- [`ratatui`](https://github.com/ratatui/ratatui) for layout and rendering
-- [`crossterm`](https://github.com/crossterm-rs/crossterm) for terminal input/output
-- [`tui-textarea`](https://github.com/rhysd/tui-textarea) for request editing
-- [`reqwest`](https://github.com/seanmonstar/reqwest) + `tokio` for async HTTP
-- `serde` / `serde_json` for persistence and JSON formatting
-
-## Layout
-
-The interface is split into three main panes:
-
-```text
-+----------------------+---------------------------------------------+
-| Library              | Request                                     |
-| saved requests       | title / method / url / headers / JSON body |
-+----------------------+---------------------------------------------+
-| Response                                                           |
-| status / time / headers / body                                     |
-+--------------------------------------------------------------------+
-```
-
 ## Getting Started
 
-### Prerequisites
-
-- Rust installed locally
-- A reasonably modern terminal
-- macOS, Linux, or Windows
-
-If you do not already have Rust installed, the usual path is:
+Install `hurl` using one of the methods below, then launch it from your terminal with:
 
 ```bash
-curl https://sh.rustup.rs -sSf | sh
+hurl
 ```
 
 ## Installation
@@ -84,25 +38,41 @@ powershell -ExecutionPolicy Bypass -c "irm https://github.com/robbiemccorkell/hu
 
 You can also download the appropriate archive for your platform from the GitHub Releases page.
 
-### Run the App
+## Features
 
-From the repo root:
+- Create requests with an optional title, HTTP method, URL, headers, and JSON request body
+- Save requests into a local library
+- Browse saved requests in the library pane
+- Load and submit saved requests
+- View status code, response time, response headers, and response body
 
-```bash
-cargo run
-```
+## Tech Stack
 
-### Run the Tests
+- [`ratatui`](https://github.com/ratatui/ratatui) for layout and rendering
+- [`crossterm`](https://github.com/crossterm-rs/crossterm) for terminal input/output
+- [`tui-textarea`](https://github.com/rhysd/tui-textarea) for request editing
+- [`reqwest`](https://github.com/seanmonstar/reqwest) + `tokio` for async HTTP
+- `serde` / `serde_json` for persistence and JSON formatting
 
-```bash
-cargo test
+## Layout
+
+The interface is split into three main panes:
+
+```text
++----------------------+---------------------------------------------+
+| Library              | Request                                     |
+| saved requests       | title / method / url / headers / JSON body |
++----------------------+---------------------------------------------+
+| Response                                                           |
+| status / time / headers / body                                     |
++--------------------------------------------------------------------+
 ```
 
 ## How To Use
 
 ### Create a Request
 
-1. Launch the app with `cargo run`.
+1. Launch the app with `hurl`.
 2. Press `n` to create a new draft.
 3. Use `Up` / `Down` in the request pane to move between fields.
 4. Press `Enter` to edit the selected field.
@@ -138,13 +108,6 @@ The response appears in the bottom-right `Response` pane.
 | `Ctrl+R` | Send the current request |
 | `q` | Quit |
 
-## Paste Behavior
-
-- For `Title` and `URL`, pasted newlines are flattened into spaces.
-- For `Headers` and `JSON Body`, multiline paste is preserved.
-- You need to be in request edit mode before normal terminal paste will land in a field.
-- `Ctrl+V` is also supported as an explicit clipboard paste shortcut.
-
 ## Where Requests Are Stored
 
 Saved requests are persisted as a JSON file in the OS-appropriate config directory using the `directories` crate.
@@ -157,39 +120,16 @@ Examples:
 
 The file name is `library.json`.
 
-## Current Limitations
+## Development
 
-This is intentionally a small first version. It does not currently include:
+If you want to run `hurl` from source:
 
-- folders or collections
-- auth helpers
-- query param builders
-- form-data or multipart support
-- request history
-- environment variables
-- response export or copy-as-curl
+```bash
+cargo run
+```
 
-## Development Notes
+To run the test suite:
 
-The app is organized into a few small modules:
-
-- `src/app.rs`: app state, key handling, event loop
-- `src/ui.rs`: ratatui rendering
-- `src/network.rs`: HTTP execution and response formatting
-- `src/storage.rs`: persistent request library
-- `src/model.rs`: request/response data types and validation
-
-## Releasing
-
-Releases are configured with `cargo-dist`.
-
-- Publishing a non-draft GitHub release triggers [`.github/workflows/on-release.yml`](.github/workflows/on-release.yml), which calls the reusable publish workflow in [`.github/workflows/publish.yml`](.github/workflows/publish.yml).
-- The workflow builds platform archives, generates installer scripts, uploads release assets, and updates the Homebrew formula.
-- The Homebrew formula is configured to publish to `robbiemccorkell/homebrew-tap`.
-
-### Maintainer Setup
-
-Before Homebrew publishing will work, the following need to exist:
-
-- a GitHub repository at `robbiemccorkell/homebrew-tap`
-- a `HOMEBREW_TAP_TOKEN` GitHub Actions secret with push access to that tap repo
+```bash
+cargo test
+```
