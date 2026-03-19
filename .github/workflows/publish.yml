@@ -94,11 +94,20 @@ jobs:
         run: |
           dist build ${{ needs.plan.outputs.tag_flag }} --print=linkage --output-format=json ${{ matrix.dist_args }} > dist-manifest.json
           Copy-Item dist-manifest.json $env:BUILD_MANIFEST_NAME
+      - id: collect_local_paths
+        name: Collect local upload paths
+        shell: bash
+        run: |
+          echo "paths<<EOF" >> "$GITHUB_OUTPUT"
+          dist print-upload-files-from-manifest --manifest dist-manifest.json >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
       - name: Upload local artifacts
         uses: actions/upload-artifact@v4
         with:
           name: artifacts-build-local-${{ join(matrix.targets, '_') }}
-          path: target/distrib/**
+          path: |
+            ${{ steps.collect_local_paths.outputs.paths }}
+            ${{ env.BUILD_MANIFEST_NAME }}
           if-no-files-found: error
 
   build-global-artifacts:
@@ -126,16 +135,22 @@ jobs:
           pattern: artifacts-build-local-*
           path: target/distrib/
           merge-multiple: true
-      - name: Build global artifacts
+      - id: build_global
+        name: Build global artifacts
         shell: bash
         run: |
           dist build ${{ needs.plan.outputs.tag_flag }} --artifacts=global --output-format=json > dist-manifest.json
+          echo "paths<<EOF" >> "$GITHUB_OUTPUT"
+          jq --raw-output ".upload_files[]" dist-manifest.json >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
           cp dist-manifest.json "$BUILD_MANIFEST_NAME"
       - name: Upload global artifacts
         uses: actions/upload-artifact@v4
         with:
           name: artifacts-build-global
-          path: target/distrib/**
+          path: |
+            ${{ steps.build_global.outputs.paths }}
+            ${{ env.BUILD_MANIFEST_NAME }}
           if-no-files-found: error
 
   host:
