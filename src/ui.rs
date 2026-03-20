@@ -1,6 +1,4 @@
-use crate::app::{
-    AppState, Pane, RequestField, Screen, SettingsFocus, StatusTone, SyncSettingsField,
-};
+use crate::app::{AppState, Pane, RequestField, Screen, SettingsFocus, SyncSettingsField};
 use crossterm::cursor::{Hide, Show};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -46,33 +44,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &AppState) {
 }
 
 fn render_top_bar(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
-    let tone_style = match app.status.tone {
-        StatusTone::Info => Style::default().fg(Color::Gray),
-        StatusTone::Success => Style::default().fg(Color::Green),
-        StatusTone::Error => Style::default().fg(Color::Red),
-    };
-
-    let context = match app.screen {
-        Screen::Main => format!(
-            "Focus: {} | Field: {}",
-            app.focus.label(),
-            app.request_field.label()
-        ),
-        Screen::Settings => format!(
-            "Section: {} | Focus: {}",
-            app.settings.section.label(),
-            settings_focus_label(app.settings.focus)
-        ),
-    };
-
-    let help = match app.screen {
-        Screen::Main => {
-            "g settings Tab panes Enter edit/load Ctrl+V paste Ctrl+S save Ctrl+R send n new q quit"
-        }
-        Screen::Settings => "Tab switch Enter edit/run Esc back g close q quit",
-    };
-
-    let line = Line::from(vec![
+    let mut spans = vec![
         Span::styled(
             "hurl",
             Style::default()
@@ -80,16 +52,15 @@ fn render_top_bar(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw(" | "),
-        Span::raw(format!("Screen: {}", app.screen.label())),
-        Span::raw(" | "),
-        Span::raw(context),
-        Span::raw(" | "),
         Span::raw(format!("Sync: {}", app.sync_status_label())),
-        Span::raw(" | "),
-        Span::styled(app.status.message.as_str(), tone_style),
-        Span::raw(" | "),
-        Span::raw(help),
-    ]);
+    ];
+
+    for control in controls_for_screen(app.screen) {
+        spans.push(Span::raw(" | "));
+        spans.push(Span::styled(*control, Style::default().fg(Color::DarkGray)));
+    }
+
+    let line = Line::from(spans);
 
     frame.render_widget(Paragraph::new(line), area);
 }
@@ -426,9 +397,24 @@ fn field_block<'a>(title: &'a str, is_selected: bool, is_editing: bool) -> Block
         .border_style(border_style)
 }
 
-fn settings_focus_label(focus: SettingsFocus) -> &'static str {
-    match focus {
-        SettingsFocus::Nav => "Nav",
-        SettingsFocus::Detail => "Detail",
+fn controls_for_screen(screen: Screen) -> &'static [&'static str] {
+    match screen {
+        Screen::Main => &[
+            "g Settings",
+            "Tab Panes",
+            "Enter Edit/Load",
+            "Ctrl+V Paste",
+            "Ctrl+S Save",
+            "Ctrl+R Send",
+            "n New",
+            "q Quit",
+        ],
+        Screen::Settings => &[
+            "Tab Switch",
+            "Enter Edit/Run",
+            "Esc Back",
+            "g Close",
+            "q Quit",
+        ],
     }
 }

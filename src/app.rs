@@ -30,6 +30,10 @@ const DISABLED_SYNC_FIELDS: [SyncSettingsField; 6] = [
 const ENABLED_SYNC_FIELDS: [SyncSettingsField; 2] =
     [SyncSettingsField::SyncNow, SyncSettingsField::Disconnect];
 
+fn sync_operation_updates_status(operation: SyncOperation) -> bool {
+    matches!(operation, SyncOperation::Manual | SyncOperation::Enable)
+}
+
 pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let path = storage::library_path()?;
     let sync_path = storage::sync_path()?;
@@ -517,9 +521,11 @@ impl AppState {
                             );
                             let _ = self.persist_sync_file();
                             self.recalculate_sync_status();
-                            self.status = StatusMessage::info(
-                                "Local changes were made during sync. Queued another sync.",
-                            );
+                            if sync_operation_updates_status(operation) {
+                                self.status = StatusMessage::info(
+                                    "Local changes were made during sync. Queued another sync.",
+                                );
+                            }
                             self.start_sync_if_possible(sender, SyncOperation::Save);
                             return;
                         }
@@ -546,10 +552,14 @@ impl AppState {
                         self.apply_synced_library(output.library);
                         if let Err(error) = self.persist_library() {
                             self.sync.last_error = Some(error.clone());
-                            self.status = StatusMessage::error(error);
+                            if sync_operation_updates_status(operation) {
+                                self.status = StatusMessage::error(error);
+                            }
                         } else if let Err(error) = self.persist_sync_file() {
                             self.sync.last_error = Some(error.clone());
-                            self.status = StatusMessage::error(error);
+                            if sync_operation_updates_status(operation) {
+                                self.status = StatusMessage::error(error);
+                            }
                         } else {
                             let mut message = match operation {
                                 SyncOperation::Enable => "Sync enabled.".to_string(),
@@ -571,11 +581,13 @@ impl AppState {
                                     output.conflict_count
                                 ));
                             }
-                            self.status = if output.warning.is_some() {
-                                StatusMessage::info(message)
-                            } else {
-                                StatusMessage::success(message)
-                            };
+                            if sync_operation_updates_status(operation) {
+                                self.status = if output.warning.is_some() {
+                                    StatusMessage::info(message)
+                                } else {
+                                    StatusMessage::success(message)
+                                };
+                            }
                         }
                     }
                     Err(error) => {
@@ -584,7 +596,9 @@ impl AppState {
                             self.sync.file.state.dirty = true;
                             let _ = self.persist_sync_file();
                         }
-                        self.status = StatusMessage::error(error);
+                        if sync_operation_updates_status(operation) {
+                            self.status = StatusMessage::error(error);
+                        }
                     }
                 }
                 self.recalculate_sync_status();
@@ -1043,7 +1057,9 @@ impl AppState {
                 let _ = self.persist_sync_file();
             }
             self.recalculate_sync_status();
-            self.status = StatusMessage::error(error);
+            if sync_operation_updates_status(operation) {
+                self.status = StatusMessage::error(error);
+            }
             return;
         }
         let Some(access_token) = self.sync.access_token.clone() else {
@@ -1077,12 +1093,14 @@ impl AppState {
         self.sync.last_error = None;
         self.sync.last_warning = None;
         self.recalculate_sync_status();
-        self.status = StatusMessage::info(match operation {
-            SyncOperation::Startup => "Running startup sync...",
-            SyncOperation::Save => "Syncing saved changes...",
-            SyncOperation::Manual => "Syncing now...",
-            SyncOperation::Enable => "Syncing...",
-        });
+        if sync_operation_updates_status(operation) {
+            self.status = StatusMessage::info(match operation {
+                SyncOperation::Startup => "Running startup sync...",
+                SyncOperation::Save => "Syncing saved changes...",
+                SyncOperation::Manual => "Syncing now...",
+                SyncOperation::Enable => "Syncing...",
+            });
+        }
 
         let sender = sender.clone();
         tokio::spawn(async move {
