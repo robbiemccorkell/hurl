@@ -89,23 +89,35 @@ pub enum RequestField {
 }
 
 impl RequestField {
-    fn next(self) -> Self {
+    fn up(self) -> Self {
         match self {
-            Self::Title => Self::Method,
-            Self::Method => Self::Url,
-            Self::Url => Self::Headers,
-            Self::Headers => Self::Body,
-            Self::Body => Self::Title,
+            Self::Title => Self::Title,
+            Self::Method | Self::Url => Self::Title,
+            Self::Headers => Self::Method,
+            Self::Body => Self::Headers,
         }
     }
 
-    fn previous(self) -> Self {
+    fn down(self) -> Self {
         match self {
-            Self::Title => Self::Body,
-            Self::Method => Self::Title,
+            Self::Title => Self::Method,
+            Self::Method | Self::Url => Self::Headers,
+            Self::Headers => Self::Body,
+            Self::Body => Self::Body,
+        }
+    }
+
+    fn left(self) -> Self {
+        match self {
             Self::Url => Self::Method,
-            Self::Headers => Self::Url,
-            Self::Body => Self::Headers,
+            field => field,
+        }
+    }
+
+    fn right(self) -> Self {
+        match self {
+            Self::Method => Self::Url,
+            field => field,
         }
     }
 }
@@ -353,14 +365,10 @@ impl AppState {
         }
 
         match key.code {
-            KeyCode::Up => self.request_field = self.request_field.previous(),
-            KeyCode::Down => self.request_field = self.request_field.next(),
-            KeyCode::Left if self.request_field == RequestField::Method => {
-                self.draft.method = self.draft.method.previous();
-            }
-            KeyCode::Right if self.request_field == RequestField::Method => {
-                self.draft.method = self.draft.method.next();
-            }
+            KeyCode::Up => self.request_field = self.request_field.up(),
+            KeyCode::Down => self.request_field = self.request_field.down(),
+            KeyCode::Left => self.request_field = self.request_field.left(),
+            KeyCode::Right => self.request_field = self.request_field.right(),
             KeyCode::Enter => {
                 self.request_editing = true;
                 self.status = StatusMessage::info(match self.request_field {
@@ -798,6 +806,45 @@ mod tests {
             &sender,
         );
         assert_eq!(app.focus, Pane::Request);
+    }
+
+    #[test]
+    fn arrow_keys_follow_request_layout_outside_edit_mode() {
+        let dir = tempdir().unwrap();
+        let (sender, _receiver) = event_channel();
+        let mut app = AppState::new(dir.path().join("library.json"), LibraryFile::default());
+
+        app.request_field = RequestField::Method;
+        app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE), &sender);
+        assert_eq!(app.request_field, RequestField::Url);
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE), &sender);
+        assert_eq!(app.request_field, RequestField::Method);
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &sender);
+        assert_eq!(app.request_field, RequestField::Headers);
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), &sender);
+        assert_eq!(app.request_field, RequestField::Method);
+    }
+
+    #[test]
+    fn method_changes_only_while_editing() {
+        let dir = tempdir().unwrap();
+        let (sender, _receiver) = event_channel();
+        let mut app = AppState::new(dir.path().join("library.json"), LibraryFile::default());
+
+        app.request_field = RequestField::Method;
+        let original = app.draft.method;
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE), &sender);
+        assert_eq!(app.draft.method, original);
+        assert_eq!(app.request_field, RequestField::Url);
+
+        app.request_field = RequestField::Method;
+        app.request_editing = true;
+        app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE), &sender);
+        assert_eq!(app.draft.method, original.next());
     }
 
     #[test]
