@@ -1,4 +1,6 @@
-use crate::app::{AppState, Pane, RequestField, StatusTone};
+use crate::app::{
+    AppState, Pane, RequestField, Screen, SettingsFocus, StatusTone, SyncSettingsField,
+};
 use crossterm::cursor::{Hide, Show};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -37,11 +39,66 @@ pub fn draw(frame: &mut Frame<'_>, app: &AppState) {
         .split(frame.area());
 
     render_top_bar(frame, layout[0], app);
+    match app.screen {
+        Screen::Main => render_main_screen(frame, layout[1], app),
+        Screen::Settings => render_settings_screen(frame, layout[1], app),
+    }
+}
 
+fn render_top_bar(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
+    let tone_style = match app.status.tone {
+        StatusTone::Info => Style::default().fg(Color::Gray),
+        StatusTone::Success => Style::default().fg(Color::Green),
+        StatusTone::Error => Style::default().fg(Color::Red),
+    };
+
+    let context = match app.screen {
+        Screen::Main => format!(
+            "Focus: {} | Field: {}",
+            app.focus.label(),
+            app.request_field.label()
+        ),
+        Screen::Settings => format!(
+            "Section: {} | Focus: {}",
+            app.settings.section.label(),
+            settings_focus_label(app.settings.focus)
+        ),
+    };
+
+    let help = match app.screen {
+        Screen::Main => {
+            "g settings Tab panes Enter edit/load Ctrl+V paste Ctrl+S save Ctrl+R send n new q quit"
+        }
+        Screen::Settings => "Tab switch Enter edit/run Esc back g close q quit",
+    };
+
+    let line = Line::from(vec![
+        Span::styled(
+            "hurl",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" | "),
+        Span::raw(format!("Screen: {}", app.screen.label())),
+        Span::raw(" | "),
+        Span::raw(context),
+        Span::raw(" | "),
+        Span::raw(format!("Sync: {}", app.sync_status_label())),
+        Span::raw(" | "),
+        Span::styled(app.status.message.as_str(), tone_style),
+        Span::raw(" | "),
+        Span::raw(help),
+    ]);
+
+    frame.render_widget(Paragraph::new(line), area);
+}
+
+fn render_main_screen(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
     let body = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(30), Constraint::Percentage(70)])
-        .split(layout[1]);
+        .split(area);
 
     let right = Layout::default()
         .direction(Direction::Vertical)
@@ -53,44 +110,132 @@ pub fn draw(frame: &mut Frame<'_>, app: &AppState) {
     render_response(frame, right[1], app);
 }
 
-fn render_top_bar(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
-    let focus = match app.focus {
-        Pane::Library => "Library",
-        Pane::Request => "Request",
-        Pane::Response => "Response",
+fn render_settings_screen(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
+    let body = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Length(24), Constraint::Min(0)])
+        .split(area);
+
+    render_settings_nav(frame, body[0], app);
+    render_settings_detail(frame, body[1], app);
+}
+
+fn render_settings_nav(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
+    let block = Block::default()
+        .title("Settings")
+        .borders(Borders::ALL)
+        .border_style(pane_style(app.settings.focus == SettingsFocus::Nav));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let items = vec![ListItem::new(app.settings.section.label())];
+    let list = List::new(items)
+        .highlight_style(Style::default().fg(Color::Black).bg(Color::Cyan))
+        .highlight_symbol("> ");
+
+    let mut state = ListState::default();
+    state.select(Some(0));
+    frame.render_stateful_widget(list, inner, &mut state);
+}
+
+fn render_settings_detail(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
+    let detail = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(7),
+            Constraint::Min(12),
+            Constraint::Length(6),
+        ])
+        .split(area);
+
+    render_sync_summary(frame, detail[0], app);
+    render_sync_fields(frame, detail[1], app);
+    render_settings_help(frame, detail[2], app);
+}
+
+fn render_sync_summary(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
+    let block = Block::default()
+        .title("Sync Status")
+        .borders(Borders::ALL)
+        .border_style(pane_style(
+            app.settings.focus == SettingsFocus::Detail && !app.settings.editing,
+        ));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let lines = app
+        .sync_summary_lines()
+        .into_iter()
+        .map(Line::from)
+        .collect::<Vec<_>>();
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+}
+
+fn render_sync_fields(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
+    let block = Block::default()
+        .title("Sync")
+        .borders(Borders::ALL)
+        .border_style(pane_style(app.settings.focus == SettingsFocus::Detail));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let fields = app.visible_sync_fields();
+    let mut constraints = fields
+        .iter()
+        .map(|_| Constraint::Length(3))
+        .collect::<Vec<_>>();
+    constraints.push(Constraint::Min(0));
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(constraints)
+        .split(inner);
+
+    for (index, field) in fields.iter().enumerate() {
+        render_sync_field(frame, rows[index], app, *field);
+    }
+}
+
+fn render_sync_field(frame: &mut Frame<'_>, area: Rect, app: &AppState, field: SyncSettingsField) {
+    let is_selected =
+        app.settings.focus == SettingsFocus::Detail && app.settings.sync_field == field;
+    let is_editing = is_selected && app.settings.editing;
+    let block = field_block(field.label(), is_selected, is_editing);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if is_editing {
+        match field {
+            SyncSettingsField::Owner => frame.render_widget(&app.sync_form.owner, inner),
+            SyncSettingsField::Repo => frame.render_widget(&app.sync_form.repo, inner),
+            SyncSettingsField::Password => frame.render_widget(&app.sync_form.password, inner),
+            SyncSettingsField::ConfirmPassword => {
+                frame.render_widget(&app.sync_form.confirm_password, inner)
+            }
+            _ => {}
+        }
+        return;
+    }
+
+    let text = app.masked_sync_value(field);
+    let style = if is_selected {
+        Style::default().fg(Color::Yellow)
+    } else {
+        Style::default()
     };
+    frame.render_widget(Paragraph::new(text).style(style), inner);
+}
 
-    let field = match app.request_field {
-        RequestField::Title => "Title",
-        RequestField::Method => "Method",
-        RequestField::Url => "URL",
-        RequestField::Headers => "Headers",
-        RequestField::Body => "Body",
-    };
+fn render_settings_help(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
+    let block = Block::default().title("Help").borders(Borders::ALL);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
 
-    let tone_style = match app.status.tone {
-        StatusTone::Info => Style::default().fg(Color::Gray),
-        StatusTone::Success => Style::default().fg(Color::Green),
-        StatusTone::Error => Style::default().fg(Color::Red),
-    };
-
-    let line = Line::from(vec![
-        Span::styled(
-            "hurl",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(" | "),
-        Span::raw(format!("Focus: {focus}")),
-        Span::raw(" | "),
-        Span::raw(format!("Field: {field}")),
-        Span::raw(" | "),
-        Span::styled(app.status.message.as_str(), tone_style),
-        Span::raw(" | Tab panes Enter edit/load Ctrl+V paste Ctrl+S save Ctrl+R send n new q quit"),
-    ]);
-
-    frame.render_widget(Paragraph::new(line), area);
+    let lines = app
+        .settings_help_lines()
+        .into_iter()
+        .map(Line::from)
+        .collect::<Vec<_>>();
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
 fn render_library(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
@@ -279,4 +424,11 @@ fn field_block<'a>(title: &'a str, is_selected: bool, is_editing: bool) -> Block
         .title(title)
         .borders(Borders::ALL)
         .border_style(border_style)
+}
+
+fn settings_focus_label(focus: SettingsFocus) -> &'static str {
+    match focus {
+        SettingsFocus::Nav => "Nav",
+        SettingsFocus::Detail => "Detail",
+    }
 }

@@ -45,6 +45,48 @@ You can also download the appropriate archive for your platform from the GitHub 
 - Browse saved requests in the library pane
 - Load and submit saved requests
 - View status code, response time, response headers, and response body
+- Optionally sync the saved request library through a user-owned private GitHub repo with client-side encryption
+
+## Sync
+
+`hurl` can sync its saved request library between machines using:
+
+- a user-owned private GitHub repository
+- GitHub sign-in through device flow
+- a user-supplied sync password for client-side encryption
+
+The sync feature is managed from the full-screen `Settings` page.
+
+### How Sync Works
+
+1. Press `g` to open `Settings`.
+2. Select `Connect GitHub` and complete the GitHub device-flow sign-in in your browser.
+3. Choose the GitHub repo owner and repo name.
+4. Enter a sync password and confirm it.
+5. Select `Enable Sync`.
+
+After sync is enabled:
+
+- `hurl` runs a best-effort sync on startup
+- `hurl` syncs after successful saves
+- you can run a manual sync from `Settings`
+
+### Security Model
+
+- Request data is encrypted locally before upload.
+- The remote GitHub repo stores a plaintext `manifest.json` plus encrypted request files.
+- Titles, URLs, headers, and request bodies are not stored in plaintext in the sync repo.
+- The sync password is stored locally in the OS keychain when available.
+
+### Merge Behavior
+
+When two machines sync against the same repo:
+
+- local-only requests are uploaded
+- remote-only requests are imported
+- if the same request changed differently on both machines, `hurl` keeps the local version and creates a `CONFLICT ...` copy for the remote version
+
+Synced deletions are not implemented yet.
 
 ## Tech Stack
 
@@ -89,6 +131,14 @@ The interface is split into three main panes:
 
 The response appears in the bottom-right `Response` pane.
 
+### Configure Sync
+
+1. Press `g` to open `Settings`.
+2. Press `Tab` to move between the settings navigation and the settings detail pane.
+3. Use `Up` / `Down` to move through the sync actions and fields.
+4. Press `Enter` to activate an action or edit a selected text field.
+5. Press `Esc` to leave settings edit mode, then `Esc` again to close `Settings`.
+
 ### Quit the App
 
 1. Press `Esc` if you are editing a field.
@@ -100,9 +150,11 @@ The response appears in the bottom-right `Response` pane.
 | --- | --- |
 | `Tab` / `Shift+Tab` | Cycle focus between panes |
 | `Up` / `Down` | Move through library items, request fields, or response scroll |
+| `Left` / `Right` | Move between adjacent request fields or settings areas where applicable |
 | `Enter` | Load a library item or enter edit mode for the selected request field |
-| `Esc` | Leave edit mode |
+| `Esc` | Leave edit mode, or close `Settings` when not editing |
 | `n` | Create a new request draft |
+| `g` | Open or close `Settings` |
 | `Ctrl+V` | Paste from clipboard into the active request text field |
 | `Ctrl+S` | Save the current request |
 | `Ctrl+R` | Send the current request |
@@ -118,7 +170,9 @@ Examples:
 - Linux: under `~/.config/...`
 - Windows: under `%APPDATA%\\...`
 
-The file name is `library.json`.
+The main local library file is `library.json`.
+
+If sync is enabled, `hurl` also stores local sync metadata in `sync.json`.
 
 ## Development
 
@@ -127,6 +181,8 @@ If you want to run `hurl` from source:
 ```bash
 cargo run
 ```
+
+To test the sync feature from source, add your GitHub OAuth app's device-flow client ID to `src/config.rs`.
 
 To run the test suite:
 

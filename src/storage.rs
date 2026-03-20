@@ -1,4 +1,5 @@
 use crate::model::{CURRENT_LIBRARY_VERSION, LibraryFile};
+use crate::sync::{SYNC_FILE_VERSION, SyncFile};
 use directories::ProjectDirs;
 use std::fmt;
 use std::fs;
@@ -11,6 +12,7 @@ pub enum StorageError {
     Io(io::Error),
     Json(serde_json::Error),
     UnsupportedVersion(u32),
+    UnsupportedSyncVersion(u32),
 }
 
 impl fmt::Display for StorageError {
@@ -23,6 +25,9 @@ impl fmt::Display for StorageError {
             Self::Json(error) => write!(f, "Failed to read library JSON: {error}"),
             Self::UnsupportedVersion(version) => {
                 write!(f, "Library version {version} is not supported.")
+            }
+            Self::UnsupportedSyncVersion(version) => {
+                write!(f, "Sync file version {version} is not supported.")
             }
         }
     }
@@ -43,9 +48,17 @@ impl From<serde_json::Error> for StorageError {
 }
 
 pub fn library_path() -> Result<PathBuf, StorageError> {
+    Ok(config_dir()?.join("library.json"))
+}
+
+pub fn sync_path() -> Result<PathBuf, StorageError> {
+    Ok(config_dir()?.join("sync.json"))
+}
+
+fn config_dir() -> Result<PathBuf, StorageError> {
     let project_dirs =
         ProjectDirs::from("dev", "hurl", "hurl").ok_or(StorageError::DirectoryUnavailable)?;
-    Ok(project_dirs.config_dir().join("library.json"))
+    Ok(project_dirs.config_dir().to_path_buf())
 }
 
 pub fn load_library(path: &Path) -> Result<LibraryFile, StorageError> {
@@ -67,6 +80,32 @@ pub fn load_library(path: &Path) -> Result<LibraryFile, StorageError> {
 }
 
 pub fn save_library(path: &Path, file: &LibraryFile) -> Result<(), StorageError> {
+    save_json(path, file)
+}
+
+pub fn load_sync_file(path: &Path) -> Result<SyncFile, StorageError> {
+    if !path.exists() {
+        return Ok(SyncFile::default());
+    }
+
+    let content = fs::read_to_string(path)?;
+    if content.trim().is_empty() {
+        return Ok(SyncFile::default());
+    }
+
+    let file: SyncFile = serde_json::from_str(&content)?;
+    if file.version != SYNC_FILE_VERSION {
+        return Err(StorageError::UnsupportedSyncVersion(file.version));
+    }
+
+    Ok(file)
+}
+
+pub fn save_sync_file(path: &Path, file: &SyncFile) -> Result<(), StorageError> {
+    save_json(path, file)
+}
+
+fn save_json<T: serde::Serialize>(path: &Path, file: &T) -> Result<(), StorageError> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -80,6 +119,7 @@ pub fn save_library(path: &Path, file: &LibraryFile) -> Result<(), StorageError>
 mod tests {
     use super::*;
     use crate::model::{HeaderEntry, HttpMethod, SavedRequest};
+    use crate::sync::{SyncConfig, SyncState};
     use tempfile::tempdir;
     use uuid::Uuid;
 
@@ -125,5 +165,33 @@ mod tests {
 
         let file = load_library(&path).unwrap();
         assert_eq!(file, LibraryFile::default());
+    }
+
+    #[test]
+    fn round_trips_sync_json() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("sync.json");
+        let file = SyncFile {
+            version: SYNC_FILE_VERSION,
+            config: Some(SyncConfig {
+                enabled: true,
+                owner: "robbie".to_string(),
+                repo: "hurl-sync".to_string(),
+                branch: "main".to_string(),
+                github_user: "robbie".to_string(),
+                device_id: Uuid::new_v4(),
+            }),
+            state: SyncState {
+                last_head_sha: Some("abc123".to_string()),
+                last_synced_hash: Default::default(),
+                last_success_at: Some("2026-03-20T12:00:00Z".to_string()),
+                dirty: false,
+            },
+        };
+
+        save_sync_file(&path, &file).unwrap();
+        let loaded = load_sync_file(&path).unwrap();
+
+        assert_eq!(loaded, file);
     }
 }
