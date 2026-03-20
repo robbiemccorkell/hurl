@@ -19,6 +19,8 @@ install-path = "CARGO_HOME"
 hosting = "github"
 # Whether to install an updater program
 install-updater = false
+# Source tarballs aren't part of the curated GitHub release asset set.
+source-tarball = false
 # A GitHub repo to push Homebrew formulas to
 tap = "robbiemccorkell/homebrew-tap"
 # Publish jobs to run in CI

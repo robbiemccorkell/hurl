@@ -181,7 +181,7 @@ jobs:
       - name: Upload artifacts to the GitHub release
         shell: bash
         run: |
-          dist host ${{ needs.plan.outputs.tag_flag }} --steps=upload --steps=release --output-format=json > dist-manifest.json
+          dist host ${{ needs.plan.outputs.tag_flag }} --steps=release --output-format=json > dist-manifest.json
           cat dist-manifest.json
       - name: Upload host manifest
         uses: actions/upload-artifact@v4
@@ -195,12 +195,25 @@ jobs:
           pattern: artifacts-*
           path: artifacts
           merge-multiple: true
-      - name: Remove dist manifests from upload set
+      - name: Upload curated artifacts to existing GitHub release
         shell: bash
-        run: rm -f artifacts/*-dist-manifest.json
-      - name: Upload artifacts to existing GitHub release
-        shell: bash
-        run: gh release upload "${{ needs.plan.outputs.tag }}" artifacts/* --clobber
+        run: |
+          shopt -s nullglob
+
+          upload_files=(
+            artifacts/hurl-installer.sh
+            artifacts/hurl-installer.ps1
+            artifacts/sha256.sum
+            artifacts/hurl-*.tar.xz
+            artifacts/hurl-*.zip
+          )
+
+          if [ "${#upload_files[@]}" -eq 0 ]; then
+            echo "No curated release assets were found."
+            exit 1
+          fi
+
+          gh release upload "${{ needs.plan.outputs.tag }}" "${upload_files[@]}" --clobber
 
   publish-homebrew-formula:
     needs:
