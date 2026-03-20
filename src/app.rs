@@ -36,12 +36,6 @@ async fn run_loop(
             app.handle_app_event(event);
         }
 
-        if app.shows_text_cursor() {
-            terminal.show_cursor()?;
-        } else {
-            terminal.hide_cursor()?;
-        }
-
         terminal.draw(|frame| ui::draw(frame, app))?;
 
         if app.should_quit {
@@ -196,19 +190,6 @@ impl AppState {
 
         state
     }
-
-    pub fn shows_text_cursor(&self) -> bool {
-        self.focus == Pane::Request
-            && self.request_editing
-            && matches!(
-                self.request_field,
-                RequestField::Title
-                    | RequestField::Url
-                    | RequestField::Headers
-                    | RequestField::Body
-            )
-    }
-
     pub fn handle_app_event(&mut self, event: AppEvent) {
         match event {
             AppEvent::NetworkResponse(result) => {

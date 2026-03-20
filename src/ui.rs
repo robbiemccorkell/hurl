@@ -1,4 +1,5 @@
 use crate::app::{AppState, Pane, RequestField, StatusTone};
+use crossterm::cursor::{Hide, Show};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -18,14 +19,14 @@ pub type AppTerminal = Terminal<CrosstermBackend<Stdout>>;
 pub fn setup_terminal() -> io::Result<AppTerminal> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableBracketedPaste)?;
+    execute!(stdout, EnterAlternateScreen, EnableBracketedPaste, Hide)?;
     Terminal::new(CrosstermBackend::new(stdout))
 }
 
 pub fn restore_terminal() -> io::Result<()> {
     disable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, DisableBracketedPaste, LeaveAlternateScreen)?;
+    execute!(stdout, DisableBracketedPaste, LeaveAlternateScreen, Show)?;
     Ok(())
 }
 
