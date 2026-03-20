@@ -130,7 +130,7 @@ jobs:
         shell: bash
         run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - name: Fetch local artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: artifacts-build-local-*
           path: target/distrib/
@@ -173,7 +173,7 @@ jobs:
         shell: bash
         run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - name: Fetch built artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: artifacts-*
           path: target/distrib/
@@ -190,7 +190,7 @@ jobs:
           path: dist-manifest.json
           if-no-files-found: error
       - name: Download release artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: artifacts-*
           path: artifacts
@@ -233,7 +233,7 @@ jobs:
           repository: robbiemccorkell/homebrew-tap
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
       - name: Fetch generated release artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: artifacts-*
           path: Formula/
