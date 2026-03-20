@@ -22,9 +22,13 @@ pub const DEFAULT_REPO_NAME: &str = "hurl-sync";
 const GITHUB_API_BASE: &str = "https://api.github.com";
 const GITHUB_DEVICE_CODE_URL: &str = "https://github.com/login/device/code";
 const GITHUB_ACCESS_TOKEN_URL: &str = "https://github.com/login/oauth/access_token";
-const SECRET_ACCOUNT: &str = "default";
-const TOKEN_SERVICE: &str = "hurl.github.sync.token";
-const PASSWORD_SERVICE: &str = "hurl.github.sync.password";
+const TOKEN_SERVICE: &str = "hurl GitHub Sync Token";
+const TOKEN_ACCOUNT: &str = "github-sync";
+const PASSWORD_SERVICE: &str = "hurl Sync Password";
+const PASSWORD_ACCOUNT: &str = "library-encryption";
+const LEGACY_TOKEN_SERVICE: &str = "hurl.github.sync.token";
+const LEGACY_PASSWORD_SERVICE: &str = "hurl.github.sync.password";
+const LEGACY_SECRET_ACCOUNT: &str = "default";
 const MANIFEST_PATH: &str = "manifest.json";
 const REQUESTS_DIR: &str = "requests";
 const ENVELOPE_VERSION: u32 = 1;
@@ -267,27 +271,37 @@ pub fn default_repo_name() -> &'static str {
 }
 
 pub fn load_access_token() -> Option<String> {
-    load_secret(TOKEN_SERVICE)
+    load_secret(TOKEN_SERVICE, TOKEN_ACCOUNT).or_else(|| {
+        let secret = load_secret(LEGACY_TOKEN_SERVICE, LEGACY_SECRET_ACCOUNT)?;
+        let _ = store_secret(TOKEN_SERVICE, TOKEN_ACCOUNT, &secret);
+        Some(secret)
+    })
 }
 
 pub fn load_sync_password() -> Option<String> {
-    load_secret(PASSWORD_SERVICE)
+    load_secret(PASSWORD_SERVICE, PASSWORD_ACCOUNT).or_else(|| {
+        let secret = load_secret(LEGACY_PASSWORD_SERVICE, LEGACY_SECRET_ACCOUNT)?;
+        let _ = store_secret(PASSWORD_SERVICE, PASSWORD_ACCOUNT, &secret);
+        Some(secret)
+    })
 }
 
 pub fn store_access_token(token: &str) -> SecretPersistence {
-    store_secret(TOKEN_SERVICE, token)
+    store_secret(TOKEN_SERVICE, TOKEN_ACCOUNT, token)
 }
 
 pub fn store_sync_password(password: &str) -> SecretPersistence {
-    store_secret(PASSWORD_SERVICE, password)
+    store_secret(PASSWORD_SERVICE, PASSWORD_ACCOUNT, password)
 }
 
 pub fn delete_access_token() -> SecretPersistence {
-    delete_secret(TOKEN_SERVICE)
+    let _ = delete_secret(LEGACY_TOKEN_SERVICE, LEGACY_SECRET_ACCOUNT);
+    delete_secret(TOKEN_SERVICE, TOKEN_ACCOUNT)
 }
 
 pub fn delete_sync_password() -> SecretPersistence {
-    delete_secret(PASSWORD_SERVICE)
+    let _ = delete_secret(LEGACY_PASSWORD_SERVICE, LEGACY_SECRET_ACCOUNT);
+    delete_secret(PASSWORD_SERVICE, PASSWORD_ACCOUNT)
 }
 
 pub fn create_repo_manifest() -> Result<RepoManifest, String> {
@@ -879,8 +893,8 @@ fn now_rfc3339() -> Result<String, String> {
         .map_err(|error| format!("Failed to format time: {error}"))
 }
 
-fn load_secret(service: &str) -> Option<String> {
-    let entry = Entry::new(service, SECRET_ACCOUNT).ok()?;
+fn load_secret(service: &str, account: &str) -> Option<String> {
+    let entry = Entry::new(service, account).ok()?;
     match entry.get_password() {
         Ok(secret) => Some(secret),
         Err(KeyringError::NoEntry) => None,
@@ -888,8 +902,8 @@ fn load_secret(service: &str) -> Option<String> {
     }
 }
 
-fn store_secret(service: &str, value: &str) -> SecretPersistence {
-    match Entry::new(service, SECRET_ACCOUNT) {
+fn store_secret(service: &str, account: &str, value: &str) -> SecretPersistence {
+    match Entry::new(service, account) {
         Ok(entry) => match entry.set_password(value) {
             Ok(()) => SecretPersistence::Persisted,
             Err(_) => SecretPersistence::SessionOnly,
@@ -898,8 +912,8 @@ fn store_secret(service: &str, value: &str) -> SecretPersistence {
     }
 }
 
-fn delete_secret(service: &str) -> SecretPersistence {
-    match Entry::new(service, SECRET_ACCOUNT) {
+fn delete_secret(service: &str, account: &str) -> SecretPersistence {
+    match Entry::new(service, account) {
         Ok(entry) => match entry.delete_credential() {
             Ok(()) | Err(KeyringError::NoEntry) => SecretPersistence::Deleted,
             Err(_) => SecretPersistence::Deleted,

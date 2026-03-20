@@ -39,7 +39,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut app = AppState::new(path, sync_path, library, sync_file);
     let mut terminal = ui::setup_terminal()?;
 
-    app.schedule_startup_sync(&sender);
+    app.schedule_startup_sync();
 
     let result = run_loop(&mut terminal, &mut app, sender, receiver).await;
     ui::restore_terminal()?;
@@ -58,6 +58,7 @@ async fn run_loop(
         }
 
         terminal.draw(|frame| ui::draw(frame, app))?;
+        app.start_pending_startup_sync(&sender);
 
         if app.should_quit {
             break;
@@ -357,6 +358,7 @@ pub struct AppState {
     storage_path: PathBuf,
     sync_path: PathBuf,
     library_revision: u64,
+    startup_sync_pending: bool,
 }
 
 impl AppState {
@@ -373,8 +375,6 @@ impl AppState {
             Pane::Request
         };
 
-        let access_token = sync::load_access_token();
-        let sync_password = sync::load_sync_password();
         let github_user = sync_file
             .config
             .as_ref()
@@ -409,8 +409,8 @@ impl AppState {
             sync: SyncRuntime {
                 file: sync_file,
                 status: SyncConnectionStatus::Off,
-                access_token,
-                sync_password,
+                access_token: None,
+                sync_password: None,
                 github_user,
                 last_error: None,
                 last_warning: None,
@@ -423,20 +423,13 @@ impl AppState {
             storage_path,
             sync_path,
             library_revision: 0,
+            startup_sync_pending: false,
         };
 
         if state.selected_index.is_some() {
             state.load_selected_request();
         }
 
-        if state.is_sync_enabled()
-            && (state.sync.access_token.is_none() || state.sync.sync_password.is_none())
-        {
-            state.sync.last_error = Some(
-                "Sync is enabled but the stored GitHub token or sync password is missing on this machine. Reconnect in Settings."
-                    .to_string(),
-            );
-        }
         state.recalculate_sync_status();
         state.sync_field_sanitize();
         state
@@ -1043,6 +1036,16 @@ impl AppState {
             self.recalculate_sync_status();
             return;
         };
+        if let Err(error) = self.ensure_sync_secrets_loaded() {
+            self.sync.last_error = Some(error.clone());
+            if matches!(operation, SyncOperation::Save) {
+                self.sync.file.state.dirty = true;
+                let _ = self.persist_sync_file();
+            }
+            self.recalculate_sync_status();
+            self.status = StatusMessage::error(error);
+            return;
+        }
         let Some(access_token) = self.sync.access_token.clone() else {
             self.sync.last_error = Some(
                 "Sync is enabled but the stored GitHub token is missing. Reconnect in Settings."
@@ -1092,8 +1095,42 @@ impl AppState {
         });
     }
 
-    pub fn schedule_startup_sync(&mut self, sender: &AppEventSender) {
-        self.start_sync_if_possible(sender, SyncOperation::Startup);
+    fn ensure_sync_secrets_loaded(&mut self) -> Result<(), String> {
+        if self.sync.access_token.is_none() {
+            self.sync.access_token = sync::load_access_token();
+        }
+        if self.sync.sync_password.is_none() {
+            self.sync.sync_password = sync::load_sync_password();
+        }
+        if self.sync.access_token.is_none() {
+            return Err(
+                "Sync is enabled but the stored GitHub token is missing. Reconnect in Settings."
+                    .to_string(),
+            );
+        }
+        if self.sync.sync_password.is_none() {
+            return Err(
+                "Sync is enabled but the sync password is missing on this machine. Reconnect in Settings."
+                    .to_string(),
+            );
+        }
+        Ok(())
+    }
+
+    pub fn schedule_startup_sync(&mut self) {
+        if self.is_sync_enabled() {
+            self.startup_sync_pending = true;
+            self.status = StatusMessage::info(
+                "Startup sync pending. hurl may ask for access to your saved GitHub sync credentials.",
+            );
+        }
+    }
+
+    pub fn start_pending_startup_sync(&mut self, sender: &AppEventSender) {
+        if self.startup_sync_pending {
+            self.startup_sync_pending = false;
+            self.start_sync_if_possible(sender, SyncOperation::Startup);
+        }
     }
 
     fn disconnect_sync(&mut self) -> Result<(), String> {
