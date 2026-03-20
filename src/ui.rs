@@ -16,6 +16,15 @@ use crossterm::terminal::{
 
 pub type AppTerminal = Terminal<CrosstermBackend<Stdout>>;
 
+const ACCENT_BLUE: Color = Color::Rgb(108, 174, 255);
+const ACCENT_BLUE_BG: Color = Color::Rgb(32, 58, 88);
+const ACCENT_AMBER: Color = Color::Rgb(233, 181, 88);
+const ACCENT_GREEN: Color = Color::Rgb(124, 196, 162);
+const ACCENT_RED: Color = Color::Rgb(227, 112, 112);
+const TEXT_MUTED: Color = Color::Rgb(118, 132, 156);
+const BORDER_MUTED: Color = Color::Rgb(72, 86, 108);
+const SELECT_FG: Color = Color::Rgb(236, 243, 255);
+
 pub fn setup_terminal() -> io::Result<AppTerminal> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -48,16 +57,21 @@ fn render_top_bar(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
         Span::styled(
             "hurl",
             Style::default()
-                .fg(Color::Cyan)
+                .fg(ACCENT_BLUE)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw(" | "),
-        Span::raw(format!("Sync: {}", app.sync_status_label())),
+        Span::styled("Sync:", Style::default().fg(TEXT_MUTED)),
+        Span::raw(" "),
+        Span::styled(
+            app.sync_status_label(),
+            sync_status_style(app.sync_status_label()),
+        ),
     ];
 
     for control in controls_for_screen(app.screen) {
         spans.push(Span::raw(" | "));
-        spans.push(Span::styled(*control, Style::default().fg(Color::DarkGray)));
+        spans.push(Span::styled(*control, Style::default().fg(TEXT_MUTED)));
     }
 
     let line = Line::from(spans);
@@ -92,16 +106,13 @@ fn render_settings_screen(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
 }
 
 fn render_settings_nav(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
-    let block = Block::default()
-        .title("Settings")
-        .borders(Borders::ALL)
-        .border_style(pane_style(app.settings.focus == SettingsFocus::Nav));
+    let block = pane_block("Settings", app.settings.focus == SettingsFocus::Nav);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
     let items = vec![ListItem::new(app.settings.section.label())];
     let list = List::new(items)
-        .highlight_style(Style::default().fg(Color::Black).bg(Color::Cyan))
+        .highlight_style(Style::default().fg(SELECT_FG).bg(ACCENT_BLUE_BG))
         .highlight_symbol("> ");
 
     let mut state = ListState::default();
@@ -125,12 +136,10 @@ fn render_settings_detail(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
 }
 
 fn render_sync_summary(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
-    let block = Block::default()
-        .title("Sync Status")
-        .borders(Borders::ALL)
-        .border_style(pane_style(
-            app.settings.focus == SettingsFocus::Detail && !app.settings.editing,
-        ));
+    let block = pane_block(
+        "Sync Status",
+        app.settings.focus == SettingsFocus::Detail && !app.settings.editing,
+    );
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -143,10 +152,7 @@ fn render_sync_summary(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
 }
 
 fn render_sync_fields(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
-    let block = Block::default()
-        .title("Sync")
-        .borders(Borders::ALL)
-        .border_style(pane_style(app.settings.focus == SettingsFocus::Detail));
+    let block = pane_block("Sync", app.settings.focus == SettingsFocus::Detail);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -189,7 +195,11 @@ fn render_sync_field(frame: &mut Frame<'_>, area: Rect, app: &AppState, field: S
 
     let text = app.masked_sync_value(field);
     let style = if is_selected {
-        Style::default().fg(Color::Yellow)
+        Style::default().fg(if is_editing {
+            ACCENT_AMBER
+        } else {
+            ACCENT_BLUE
+        })
     } else {
         Style::default()
     };
@@ -197,7 +207,7 @@ fn render_sync_field(frame: &mut Frame<'_>, area: Rect, app: &AppState, field: S
 }
 
 fn render_settings_help(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
-    let block = Block::default().title("Help").borders(Borders::ALL);
+    let block = pane_block("Help", false);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -210,10 +220,7 @@ fn render_settings_help(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
 }
 
 fn render_library(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
-    let block = Block::default()
-        .title("Library")
-        .borders(Borders::ALL)
-        .border_style(pane_style(app.focus == Pane::Library));
+    let block = pane_block("Library", app.focus == Pane::Library);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -231,7 +238,7 @@ fn render_library(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
         .collect::<Vec<_>>();
 
     let list = List::new(items)
-        .highlight_style(Style::default().fg(Color::Black).bg(Color::Cyan))
+        .highlight_style(Style::default().fg(SELECT_FG).bg(ACCENT_BLUE_BG))
         .highlight_symbol("> ");
 
     let mut state = ListState::default();
@@ -240,10 +247,7 @@ fn render_library(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
 }
 
 fn render_request_editor(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
-    let block = Block::default()
-        .title("Request")
-        .borders(Borders::ALL)
-        .border_style(pane_style(app.focus == Pane::Request));
+    let block = pane_block("Request", app.focus == Pane::Request);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -315,7 +319,11 @@ fn render_method_field(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
     };
 
     let style = if is_selected {
-        Style::default().fg(Color::Yellow)
+        Style::default().fg(if app.request_editing {
+            ACCENT_AMBER
+        } else {
+            ACCENT_BLUE
+        })
     } else {
         Style::default()
     };
@@ -350,10 +358,7 @@ fn render_text_field(
 }
 
 fn render_response(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
-    let block = Block::default()
-        .title("Response")
-        .borders(Borders::ALL)
-        .border_style(pane_style(app.focus == Pane::Response));
+    let block = pane_block("Response", app.focus == Pane::Response);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -376,25 +381,68 @@ fn render_response(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
 
 fn pane_style(is_focused: bool) -> Style {
     if is_focused {
-        Style::default().fg(Color::Cyan)
+        Style::default().fg(ACCENT_BLUE)
     } else {
-        Style::default().fg(Color::DarkGray)
+        Style::default().fg(BORDER_MUTED)
     }
 }
 
 fn field_block<'a>(title: &'a str, is_selected: bool, is_editing: bool) -> Block<'a> {
     let border_style = if is_editing {
-        Style::default().fg(Color::Yellow)
+        Style::default().fg(ACCENT_AMBER)
     } else if is_selected {
-        Style::default().fg(Color::Cyan)
+        Style::default().fg(ACCENT_BLUE)
     } else {
+        Style::default().fg(BORDER_MUTED)
+    };
+
+    let title_style = if is_editing {
         Style::default()
+            .fg(ACCENT_AMBER)
+            .add_modifier(Modifier::BOLD)
+    } else if is_selected {
+        Style::default()
+            .fg(ACCENT_BLUE)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(TEXT_MUTED)
     };
 
     Block::default()
-        .title(title)
+        .title(Line::from(Span::styled(title, title_style)))
         .borders(Borders::ALL)
         .border_style(border_style)
+}
+
+fn pane_block<'a>(title: &'a str, is_focused: bool) -> Block<'a> {
+    let title_style = if is_focused {
+        Style::default()
+            .fg(ACCENT_BLUE)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(TEXT_MUTED)
+    };
+
+    Block::default()
+        .title(Line::from(Span::styled(title, title_style)))
+        .borders(Borders::ALL)
+        .border_style(pane_style(is_focused))
+}
+
+fn sync_status_style(status: &str) -> Style {
+    match status {
+        "Ready" => Style::default()
+            .fg(ACCENT_GREEN)
+            .add_modifier(Modifier::BOLD),
+        "Syncing" => Style::default()
+            .fg(ACCENT_BLUE)
+            .add_modifier(Modifier::BOLD),
+        "Dirty" => Style::default()
+            .fg(ACCENT_AMBER)
+            .add_modifier(Modifier::BOLD),
+        "Error" => Style::default().fg(ACCENT_RED).add_modifier(Modifier::BOLD),
+        _ => Style::default().fg(TEXT_MUTED),
+    }
 }
 
 fn controls_for_screen(screen: Screen) -> &'static [&'static str] {
