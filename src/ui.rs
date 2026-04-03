@@ -1,12 +1,13 @@
 use crate::app::{
     AppState, Pane, RequestField, ResponseView, Screen, SettingsFocus, SyncSettingsField,
 };
-use crate::model::ResponseTrace;
+use crate::highlight;
+use crate::model::{ResponseBody, ResponseTrace};
 use crossterm::cursor::{Hide, Show};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Span};
+use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
 use std::io::{self, Stdout};
@@ -359,7 +360,13 @@ fn render_text_field(
         return;
     }
 
-    let paragraph = Paragraph::new(text.to_string()).wrap(Wrap { trim: false });
+    let content = if field == RequestField::Body {
+        highlight::highlight_json_or_plain(text)
+    } else {
+        Text::from(text.to_string())
+    };
+
+    let paragraph = Paragraph::new(content).wrap(Wrap { trim: false });
     frame.render_widget(paragraph, inner);
 }
 
@@ -382,12 +389,12 @@ fn render_response(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
             app,
             app.response
                 .as_ref()
-                .map(|response| response.body_text())
+                .map(response_body_text)
                 .unwrap_or_else(|| {
                     if app.request_in_flight {
-                        "Waiting for the response body...".to_string()
+                        Text::from("Waiting for the response body...".to_string())
                     } else {
-                        "Submit a request to see the response body here.".to_string()
+                        Text::from("Submit a request to see the response body here.".to_string())
                     }
                 }),
         ),
@@ -397,12 +404,12 @@ fn render_response(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
             app,
             app.response
                 .as_ref()
-                .map(|response| response.headers_text())
+                .map(|response| Text::from(response.headers_text()))
                 .unwrap_or_else(|| {
                     if app.request_in_flight {
-                        "Waiting for response headers...".to_string()
+                        Text::from("Waiting for response headers...".to_string())
                     } else {
-                        "Submit a request to inspect response headers here.".to_string()
+                        Text::from("Submit a request to inspect response headers here.".to_string())
                     }
                 }),
         ),
@@ -437,11 +444,23 @@ fn render_response_tabs(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
-fn render_response_text_view(frame: &mut Frame<'_>, area: Rect, app: &AppState, text: String) {
+fn render_response_text_view(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &AppState,
+    text: Text<'static>,
+) {
     let response = Paragraph::new(text)
         .wrap(Wrap { trim: false })
         .scroll((app.response_scroll, 0));
     frame.render_widget(response, area);
+}
+
+fn response_body_text(response: &crate::model::ResponseData) -> Text<'static> {
+    match &response.body {
+        ResponseBody::PrettyJson(text) => highlight::highlight_json_or_plain(text),
+        _ => Text::from(response.body_text()),
+    }
 }
 
 fn render_trace_view(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
