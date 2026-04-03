@@ -1,7 +1,7 @@
 use crate::config;
 use crate::events::{AppEvent, AppEventReceiver, AppEventSender, SyncOperation, event_channel};
 use crate::model::{
-    HeaderEntry, HttpMethod, LibraryFile, RequestInput, ResponseData, SavedRequest,
+    HeaderEntry, HttpMethod, LibraryFile, RequestInput, ResponseData, ResponseTrace, SavedRequest,
     headers_to_text, parse_header_lines, validate_json_body, validate_url,
 };
 use crate::sync::{
@@ -182,6 +182,39 @@ impl RequestField {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ResponseView {
+    Trace,
+    Body,
+    Headers,
+}
+
+impl ResponseView {
+    fn next(self) -> Self {
+        match self {
+            Self::Trace => Self::Body,
+            Self::Body => Self::Headers,
+            Self::Headers => Self::Trace,
+        }
+    }
+
+    fn previous(self) -> Self {
+        match self {
+            Self::Trace => Self::Headers,
+            Self::Body => Self::Trace,
+            Self::Headers => Self::Body,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Trace => "Trace",
+            Self::Body => "Body",
+            Self::Headers => "Headers",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SettingsFocus {
     Nav,
     Detail,
@@ -349,9 +382,11 @@ pub struct AppState {
     pub selected_index: Option<usize>,
     pub draft: RequestEditor,
     pub response: Option<ResponseData>,
+    pub trace: Option<ResponseTrace>,
     pub focus: Pane,
     pub request_field: RequestField,
     pub request_editing: bool,
+    pub response_view: ResponseView,
     pub response_scroll: u16,
     pub settings: SettingsState,
     pub sync_form: SyncSettingsForm,
@@ -404,9 +439,11 @@ impl AppState {
             selected_index,
             draft: RequestEditor::blank(),
             response: None,
+            trace: None,
             focus,
             request_field: RequestField::Title,
             request_editing: false,
+            response_view: ResponseView::Trace,
             response_scroll: 0,
             settings: SettingsState::default(),
             sync_form: SyncSettingsForm::new(owner, repo),
@@ -441,18 +478,43 @@ impl AppState {
 
     pub fn handle_app_event(&mut self, event: AppEvent, sender: &AppEventSender) {
         match event {
-            AppEvent::NetworkResponse(result) => {
+            AppEvent::NetworkStarted(trace) => {
+                self.response_scroll = 0;
+                self.response_view = ResponseView::Trace;
+                self.response = None;
+                self.trace = Some(trace);
+            }
+            AppEvent::NetworkHead {
+                trace_id,
+                status_code,
+                reason,
+                content_length,
+            } => {
+                if let Some(trace) = self.trace_for_id_mut(trace_id) {
+                    trace.apply_head(status_code, reason, content_length);
+                }
+            }
+            AppEvent::NetworkTraceSample { trace_id, snapshot } => {
+                if let Some(trace) = self.trace_for_id_mut(trace_id) {
+                    trace.apply_metrics_snapshot(&snapshot);
+                }
+            }
+            AppEvent::NetworkResponse { trace_id, result } => {
                 self.request_in_flight = false;
                 match result {
-                    Ok(response) => {
+                    Ok(mut response) => {
+                        response.trace =
+                            self.merge_finished_trace(trace_id, response.trace.clone());
                         self.response_scroll = 0;
                         self.status = StatusMessage::success(format!(
                             "Received {} in {} ms.",
                             response.status_code, response.elapsed_ms
                         ));
+                        self.trace = Some(response.trace.clone());
                         self.response = Some(response);
                     }
                     Err(error) => {
+                        self.mark_trace_failed(trace_id, &error);
                         self.status = StatusMessage::error(error);
                     }
                 }
@@ -863,10 +925,26 @@ impl AppState {
 
     fn handle_response_key(&mut self, key: KeyEvent) {
         match key.code {
-            KeyCode::Up => self.response_scroll = self.response_scroll.saturating_sub(1),
-            KeyCode::Down => self.response_scroll = self.response_scroll.saturating_add(1),
-            KeyCode::PageUp => self.response_scroll = self.response_scroll.saturating_sub(10),
-            KeyCode::PageDown => self.response_scroll = self.response_scroll.saturating_add(10),
+            KeyCode::Left => {
+                self.response_view = self.response_view.previous();
+                self.response_scroll = 0;
+            }
+            KeyCode::Right => {
+                self.response_view = self.response_view.next();
+                self.response_scroll = 0;
+            }
+            KeyCode::Up if self.response_view != ResponseView::Trace => {
+                self.response_scroll = self.response_scroll.saturating_sub(1)
+            }
+            KeyCode::Down if self.response_view != ResponseView::Trace => {
+                self.response_scroll = self.response_scroll.saturating_add(1)
+            }
+            KeyCode::PageUp if self.response_view != ResponseView::Trace => {
+                self.response_scroll = self.response_scroll.saturating_sub(10)
+            }
+            KeyCode::PageDown if self.response_view != ResponseView::Trace => {
+                self.response_scroll = self.response_scroll.saturating_add(10)
+            }
             _ => {}
         }
     }
@@ -1401,15 +1479,107 @@ impl AppState {
 
         let request = self.draft.to_request_input()?;
         self.request_in_flight = true;
+        self.response = None;
+        self.trace = None;
+        self.response_view = ResponseView::Trace;
+        self.response_scroll = 0;
         self.status = StatusMessage::info("Sending request...");
         let sender = sender.clone();
 
         tokio::spawn(async move {
-            let result = network::send_request(request).await;
-            let _ = sender.send(AppEvent::NetworkResponse(result));
+            network::send_request(request, sender).await;
         });
 
         Ok(())
+    }
+
+    fn trace_for_id_mut(&mut self, trace_id: Uuid) -> Option<&mut ResponseTrace> {
+        self.trace
+            .as_mut()
+            .filter(|trace| trace.trace_id == trace_id)
+    }
+
+    fn merge_finished_trace(
+        &mut self,
+        trace_id: Uuid,
+        mut finished: ResponseTrace,
+    ) -> ResponseTrace {
+        if let Some(current) = self.trace.take() {
+            if current.trace_id == trace_id {
+                let mut samples = current.samples;
+                if let Some(sample) = finished.samples.last().copied() {
+                    if samples.last().copied() != Some(sample) {
+                        samples.push(sample);
+                    }
+                }
+                if !samples.is_empty() {
+                    finished.samples = samples;
+                }
+                if finished.status_code.is_none() {
+                    finished.status_code = current.status_code;
+                }
+                if finished.reason.is_none() {
+                    finished.reason = current.reason;
+                }
+                if finished.content_length.is_none() {
+                    finished.content_length = current.content_length;
+                }
+                if finished.name_lookup_time_ms.is_none() {
+                    finished.name_lookup_time_ms = current.name_lookup_time_ms;
+                }
+                if finished.connect_time_ms.is_none() {
+                    finished.connect_time_ms = current.connect_time_ms;
+                }
+                if finished.secure_connect_time_ms.is_none() {
+                    finished.secure_connect_time_ms = current.secure_connect_time_ms;
+                }
+                if finished.transfer_start_time_ms.is_none() {
+                    finished.transfer_start_time_ms = current.transfer_start_time_ms;
+                }
+                if finished.transfer_time_ms.is_none() {
+                    finished.transfer_time_ms = current.transfer_time_ms;
+                }
+                if finished.total_time_ms.is_none() {
+                    finished.total_time_ms = current.total_time_ms;
+                }
+                if finished.redirect_time_ms.is_none() {
+                    finished.redirect_time_ms = current.redirect_time_ms;
+                }
+                finished.uploaded_bytes = finished.uploaded_bytes.max(current.uploaded_bytes);
+                finished.downloaded_bytes = finished.downloaded_bytes.max(current.downloaded_bytes);
+                finished.upload_speed_bytes_per_sec = finished
+                    .upload_speed_bytes_per_sec
+                    .max(current.upload_speed_bytes_per_sec);
+                finished.download_speed_bytes_per_sec = finished
+                    .download_speed_bytes_per_sec
+                    .max(current.download_speed_bytes_per_sec);
+            } else {
+                self.trace = Some(current);
+            }
+        }
+
+        finished
+    }
+
+    fn mark_trace_failed(&mut self, trace_id: Uuid, error: &str) {
+        if let Some(trace) = self.trace_for_id_mut(trace_id) {
+            trace.mark_failed(error.to_string());
+            return;
+        }
+
+        let request = self
+            .draft
+            .to_request_input()
+            .unwrap_or_else(|_| RequestInput {
+                title: self.draft.optional_title(),
+                method: self.draft.method,
+                url: self.draft.url_text(),
+                headers: Vec::new(),
+                json_body: String::new(),
+            });
+        let mut trace = ResponseTrace::new(&request, trace_id);
+        trace.mark_failed(error.to_string());
+        self.trace = Some(trace);
     }
 
     pub fn sync_status_label(&self) -> &'static str {

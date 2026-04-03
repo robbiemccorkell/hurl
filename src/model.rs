@@ -107,6 +107,20 @@ pub struct RequestInput {
     pub json_body: String,
 }
 
+impl RequestInput {
+    pub fn display_label(&self) -> String {
+        match self
+            .title
+            .as_deref()
+            .map(str::trim)
+            .filter(|title| !title.is_empty())
+        {
+            Some(title) => format!("{title} [{}]", self.method),
+            None => format!("{} {}", self.method, self.url),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct LibraryFile {
     pub version: u32,
@@ -127,14 +141,16 @@ pub struct ResponseData {
     pub status_code: u16,
     pub reason: Option<String>,
     pub elapsed_ms: u128,
+    pub content_type: Option<String>,
+    pub body_bytes: usize,
     pub headers: Vec<HeaderEntry>,
     pub body: ResponseBody,
+    pub trace: ResponseTrace,
 }
 
 impl ResponseData {
-    pub fn display_text(&self) -> String {
-        let reason = self.reason.as_deref().unwrap_or("Unknown");
-        let header_text = if self.headers.is_empty() {
+    pub fn headers_text(&self) -> String {
+        if self.headers.is_empty() {
             "<none>".to_string()
         } else {
             self.headers
@@ -142,16 +158,240 @@ impl ResponseData {
                 .map(|header| format!("{}: {}", header.name, header.value))
                 .collect::<Vec<_>>()
                 .join("\n")
-        };
+        }
+    }
+
+    pub fn body_text(&self) -> String {
+        let mut output = self.body.display_text().to_string();
+        if let Some(suffix) = self.body.detail_suffix() {
+            output.push_str(&suffix);
+        }
+        output
+    }
+
+    pub fn display_text(&self) -> String {
+        let reason = self.reason.as_deref().unwrap_or("Unknown");
+        let header_text = self.headers_text();
+        let content_type = self.content_type.as_deref().unwrap_or("unknown");
 
         format!(
-            "Status: {} {}\nTime: {} ms\n\nHeaders\n{}\n\nBody\n{}",
+            "Status: {} {}\nTime: {} ms\nType: {}\nSize: {} bytes\n\nHeaders\n{}\n\nBody\n{}",
             self.status_code,
             reason,
             self.elapsed_ms,
+            content_type,
+            self.body_bytes,
             header_text,
-            self.body.display_text()
+            self.body_text()
         )
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResponseTrace {
+    pub trace_id: Uuid,
+    pub label: String,
+    pub method: HttpMethod,
+    pub url: String,
+    pub state: TraceState,
+    pub status_code: Option<u16>,
+    pub reason: Option<String>,
+    pub content_length: Option<u64>,
+    pub uploaded_bytes: u64,
+    pub downloaded_bytes: u64,
+    pub upload_speed_bytes_per_sec: u64,
+    pub download_speed_bytes_per_sec: u64,
+    pub name_lookup_time_ms: Option<u128>,
+    pub connect_time_ms: Option<u128>,
+    pub secure_connect_time_ms: Option<u128>,
+    pub transfer_start_time_ms: Option<u128>,
+    pub transfer_time_ms: Option<u128>,
+    pub total_time_ms: Option<u128>,
+    pub redirect_time_ms: Option<u128>,
+    pub samples: Vec<TraceSample>,
+    pub error: Option<String>,
+}
+
+impl ResponseTrace {
+    pub fn new(request: &RequestInput, trace_id: Uuid) -> Self {
+        Self {
+            trace_id,
+            label: request.display_label(),
+            method: request.method,
+            url: request.url.clone(),
+            state: TraceState::Pending,
+            status_code: None,
+            reason: None,
+            content_length: None,
+            uploaded_bytes: 0,
+            downloaded_bytes: 0,
+            upload_speed_bytes_per_sec: 0,
+            download_speed_bytes_per_sec: 0,
+            name_lookup_time_ms: None,
+            connect_time_ms: None,
+            secure_connect_time_ms: None,
+            transfer_start_time_ms: None,
+            transfer_time_ms: None,
+            total_time_ms: None,
+            redirect_time_ms: None,
+            samples: Vec::new(),
+            error: None,
+        }
+    }
+
+    pub fn apply_head(
+        &mut self,
+        status_code: u16,
+        reason: Option<String>,
+        content_length: Option<u64>,
+    ) {
+        self.state = TraceState::Receiving;
+        self.status_code = Some(status_code);
+        self.reason = reason;
+        self.content_length = content_length;
+    }
+
+    pub fn apply_metrics_snapshot(&mut self, snapshot: &TraceMetricsSnapshot) {
+        self.state = if matches!(self.state, TraceState::Pending) {
+            TraceState::Receiving
+        } else {
+            self.state
+        };
+        self.uploaded_bytes = snapshot.uploaded_bytes;
+        self.downloaded_bytes = snapshot.downloaded_bytes;
+        self.upload_speed_bytes_per_sec = snapshot.upload_speed_bytes_per_sec;
+        self.download_speed_bytes_per_sec = snapshot.download_speed_bytes_per_sec;
+        self.name_lookup_time_ms = snapshot.name_lookup_time_ms;
+        self.connect_time_ms = snapshot.connect_time_ms;
+        self.secure_connect_time_ms = snapshot.secure_connect_time_ms;
+        self.transfer_start_time_ms = snapshot.transfer_start_time_ms;
+        self.transfer_time_ms = snapshot.transfer_time_ms;
+        self.total_time_ms = snapshot.total_time_ms;
+        self.redirect_time_ms = snapshot.redirect_time_ms;
+        self.samples.push(snapshot.sample());
+        if self.samples.len() > 240 {
+            let overflow = self.samples.len() - 240;
+            self.samples.drain(0..overflow);
+        }
+    }
+
+    pub fn mark_complete(&mut self, elapsed_ms: u128) {
+        self.state = TraceState::Complete;
+        self.total_time_ms = Some(elapsed_ms);
+    }
+
+    pub fn mark_failed(&mut self, error: String) {
+        self.state = TraceState::Failed;
+        self.error = Some(error);
+    }
+
+    pub fn total_time_ms(&self) -> u128 {
+        self.total_time_ms
+            .or(self
+                .transfer_start_time_ms
+                .map(|start| start + self.transfer_time_ms.unwrap_or_default()))
+            .unwrap_or(0)
+    }
+
+    pub fn max_sample_speed_bytes_per_sec(&self) -> u64 {
+        self.samples
+            .iter()
+            .map(TraceSample::peak_speed_bytes_per_sec)
+            .max()
+            .unwrap_or_else(|| {
+                self.download_speed_bytes_per_sec
+                    .max(self.upload_speed_bytes_per_sec)
+            })
+    }
+
+    pub fn waterfall_phases(&self) -> Vec<TracePhaseBar> {
+        let redirect_end = self.redirect_time_ms.unwrap_or(0);
+        let name_lookup_end = self.name_lookup_time_ms.unwrap_or(redirect_end);
+        let connect_end = self.connect_time_ms.unwrap_or(name_lookup_end);
+        let secure_connect_end = self.secure_connect_time_ms.unwrap_or(connect_end);
+        let transfer_start_end = self.transfer_start_time_ms.unwrap_or(secure_connect_end);
+        let total_end = self.total_time_ms().max(transfer_start_end);
+
+        [
+            ("Redirect", 0, redirect_end),
+            ("DNS", redirect_end, name_lookup_end),
+            ("TCP", name_lookup_end, connect_end),
+            ("TLS", connect_end, secure_connect_end),
+            ("Wait", secure_connect_end, transfer_start_end),
+            ("Recv", transfer_start_end, total_end),
+        ]
+        .into_iter()
+        .map(|(label, start_ms, end_ms)| TracePhaseBar {
+            label,
+            start_ms,
+            end_ms,
+        })
+        .collect()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TraceState {
+    Pending,
+    Receiving,
+    Complete,
+    Failed,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TraceSample {
+    pub at_ms: u128,
+    pub uploaded_bytes: u64,
+    pub downloaded_bytes: u64,
+    pub upload_speed_bytes_per_sec: u64,
+    pub download_speed_bytes_per_sec: u64,
+}
+
+impl TraceSample {
+    pub fn peak_speed_bytes_per_sec(&self) -> u64 {
+        self.upload_speed_bytes_per_sec
+            .max(self.download_speed_bytes_per_sec)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TraceMetricsSnapshot {
+    pub at_ms: u128,
+    pub uploaded_bytes: u64,
+    pub downloaded_bytes: u64,
+    pub upload_speed_bytes_per_sec: u64,
+    pub download_speed_bytes_per_sec: u64,
+    pub name_lookup_time_ms: Option<u128>,
+    pub connect_time_ms: Option<u128>,
+    pub secure_connect_time_ms: Option<u128>,
+    pub transfer_start_time_ms: Option<u128>,
+    pub transfer_time_ms: Option<u128>,
+    pub total_time_ms: Option<u128>,
+    pub redirect_time_ms: Option<u128>,
+}
+
+impl TraceMetricsSnapshot {
+    pub fn sample(&self) -> TraceSample {
+        TraceSample {
+            at_ms: self.at_ms,
+            uploaded_bytes: self.uploaded_bytes,
+            downloaded_bytes: self.downloaded_bytes,
+            upload_speed_bytes_per_sec: self.upload_speed_bytes_per_sec,
+            download_speed_bytes_per_sec: self.download_speed_bytes_per_sec,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TracePhaseBar {
+    pub label: &'static str,
+    pub start_ms: u128,
+    pub end_ms: u128,
+}
+
+impl TracePhaseBar {
+    pub fn duration_ms(self) -> u128 {
+        self.end_ms.saturating_sub(self.start_ms)
     }
 }
 

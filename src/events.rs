@@ -1,6 +1,7 @@
-use crate::model::ResponseData;
+use crate::model::{ResponseData, ResponseTrace, TraceMetricsSnapshot};
 use crate::sync::{DeviceCodePrompt, GitHubIdentity, SyncRunOutput};
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
+use uuid::Uuid;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SyncOperation {
@@ -12,7 +13,21 @@ pub enum SyncOperation {
 
 #[derive(Debug)]
 pub enum AppEvent {
-    NetworkResponse(Result<ResponseData, String>),
+    NetworkStarted(ResponseTrace),
+    NetworkHead {
+        trace_id: Uuid,
+        status_code: u16,
+        reason: Option<String>,
+        content_length: Option<u64>,
+    },
+    NetworkTraceSample {
+        trace_id: Uuid,
+        snapshot: TraceMetricsSnapshot,
+    },
+    NetworkResponse {
+        trace_id: Uuid,
+        result: Result<ResponseData, String>,
+    },
     GitHubDeviceCode(Result<DeviceCodePrompt, String>),
     GitHubAuthComplete(Result<GitHubIdentity, String>),
     SyncFinished {
