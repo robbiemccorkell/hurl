@@ -1,6 +1,16 @@
-# hurl
+<h1 align="center">hurl</h1>
 
-`hurl` is a terminal UI API client for humans.
+<p align="center">
+  <img src="docs/ralph-icon.png" alt="Ralph mascot" width="180">
+</p>
+
+<p align="center">
+  <a href="https://github.com/robbiemccorkell/hurl/actions/workflows/on-push.yml">
+    <img src="https://github.com/robbiemccorkell/hurl/actions/workflows/on-push.yml/badge.svg?branch=main" alt="Test status">
+  </a>
+</p>
+
+<p align="center"><strong><code>hurl</code> is a terminal UI API client for humans.</strong></p>
 
 It is a Rust project that aims to feel like a lightweight, keyboard-driven Postman for the terminal, focused on creating, saving, and sending JSON-oriented HTTP requests from a TUI.
 
