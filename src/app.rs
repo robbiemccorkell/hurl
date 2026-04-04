@@ -1,8 +1,9 @@
 use crate::config;
 use crate::events::{AppEvent, AppEventReceiver, AppEventSender, SyncOperation, event_channel};
 use crate::model::{
-    HeaderEntry, HttpMethod, LibraryFile, RequestInput, ResponseData, ResponseTrace, SavedRequest,
-    headers_to_text, parse_header_lines, validate_json_body, validate_url,
+    HeaderEntry, HttpMethod, LibraryData, LibraryFile, RequestInput, ResponseData, ResponseTrace,
+    SavedFolder, SavedRequest, headers_to_text, parse_header_lines, validate_json_body,
+    validate_url,
 };
 use crate::sync::{
     self, DeviceCodePrompt, SecretPersistence, SyncConfig, SyncFile,
@@ -303,6 +304,38 @@ impl StatusMessage {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LibraryItemKey {
+    Folder(Uuid),
+    Request(Uuid),
+}
+
+#[derive(Clone, Debug)]
+pub struct LibraryListItem {
+    pub key: LibraryItemKey,
+    pub label: String,
+    pub is_cut: bool,
+}
+
+#[derive(Debug)]
+pub struct FolderNamePrompt {
+    pub parent_id: Option<Uuid>,
+    pub input: TextArea<'static>,
+}
+
+impl FolderNamePrompt {
+    fn new(parent_id: Option<Uuid>) -> Self {
+        Self {
+            parent_id,
+            input: single_line_area(""),
+        }
+    }
+
+    fn name(&self) -> String {
+        sanitize_single_line(&self.input)
+    }
+}
+
 #[derive(Debug)]
 pub struct SettingsState {
     pub focus: SettingsFocus,
@@ -378,8 +411,11 @@ pub struct SyncRuntime {
 #[derive(Debug)]
 pub struct AppState {
     pub screen: Screen,
-    pub library: Vec<SavedRequest>,
-    pub selected_index: Option<usize>,
+    pub library: LibraryData,
+    pub current_folder_id: Option<Uuid>,
+    pub selected_library_item: Option<LibraryItemKey>,
+    pub library_clipboard: Option<LibraryItemKey>,
+    pub folder_name_prompt: Option<FolderNamePrompt>,
     pub draft: RequestEditor,
     pub response: Option<ResponseData>,
     pub trace: Option<ResponseTrace>,
@@ -407,8 +443,9 @@ impl AppState {
         library: LibraryFile,
         sync_file: SyncFile,
     ) -> Self {
-        let selected_index = (!library.requests.is_empty()).then_some(0);
-        let focus = if selected_index.is_some() {
+        let library = LibraryData::from(library).normalized();
+        let selected_library_item = first_library_item(&library, None);
+        let focus = if selected_library_item.is_some() {
             Pane::Library
         } else {
             Pane::Request
@@ -435,8 +472,11 @@ impl AppState {
 
         let mut state = Self {
             screen: Screen::Main,
-            library: library.requests,
-            selected_index,
+            library,
+            current_folder_id: None,
+            selected_library_item,
+            library_clipboard: None,
+            folder_name_prompt: None,
             draft: RequestEditor::blank(),
             response: None,
             trace: None,
@@ -467,10 +507,11 @@ impl AppState {
             startup_sync_pending: false,
         };
 
-        if state.selected_index.is_some() {
+        if state.selected_library_item.is_some() {
             state.load_selected_request();
         }
 
+        state.sync_library_context();
         state.recalculate_sync_status();
         state.sync_field_sanitize();
         state
@@ -633,7 +674,7 @@ impl AppState {
                             };
                             if output.imported_count > 0 || output.uploaded_count > 0 {
                                 message.push_str(&format!(
-                                    " Imported {} and uploaded {} request(s).",
+                                    " Imported {} and uploaded {} item(s).",
                                     output.imported_count, output.uploaded_count
                                 ));
                             }
@@ -671,6 +712,11 @@ impl AppState {
     pub fn handle_paste(&mut self, text: String) {
         match self.screen {
             Screen::Main => {
+                if let Some(prompt) = self.folder_name_prompt.as_mut() {
+                    prompt.input.insert_str(normalize_single_line_paste(&text));
+                    return;
+                }
+
                 if self.focus != Pane::Request || !self.request_editing {
                     return;
                 }
@@ -733,6 +779,10 @@ impl AppState {
             return;
         }
 
+        if self.handle_folder_prompt_key(key) {
+            return;
+        }
+
         if self.handle_global_shortcuts(key, sender) {
             return;
         }
@@ -759,7 +809,12 @@ impl AppState {
         }
 
         match self.screen {
-            Screen::Main => self.request_editing = true,
+            Screen::Main => {
+                if self.folder_name_prompt.is_some() {
+                    return true;
+                }
+                self.request_editing = true;
+            }
             Screen::Settings => self.settings.editing = true,
         }
 
@@ -871,11 +926,46 @@ impl AppState {
 
     fn handle_library_key(&mut self, key: KeyEvent) {
         match key.code {
-            KeyCode::Up => self.select_previous_request(),
-            KeyCode::Down => self.select_next_request(),
-            KeyCode::Enter => {
-                if self.load_selected_request() {
-                    self.status = StatusMessage::info("Loaded request into the editor.");
+            KeyCode::Up => self.select_previous_library_item(),
+            KeyCode::Down => self.select_next_library_item(),
+            KeyCode::Left | KeyCode::Backspace => {
+                if self.navigate_to_parent_folder() {
+                    self.status = StatusMessage::info("Moved to the parent folder.");
+                }
+            }
+            KeyCode::Enter => match self.selected_library_item {
+                Some(LibraryItemKey::Folder(folder_id)) => {
+                    if self.open_folder(folder_id) {
+                        self.status = StatusMessage::info("Opened folder.");
+                    }
+                }
+                Some(LibraryItemKey::Request(_)) => {
+                    if self.load_selected_request() {
+                        self.status = StatusMessage::info("Loaded request into the editor.");
+                    }
+                }
+                None => {}
+            },
+            KeyCode::Char('f') => {
+                self.start_folder_creation();
+            }
+            KeyCode::Char('x') => match self.cut_selected_library_item() {
+                Ok(()) => {
+                    self.status = StatusMessage::info(
+                        "Cut library item. Navigate to a folder and press `p` to paste it.",
+                    );
+                }
+                Err(error) => self.status = StatusMessage::error(error),
+            },
+            KeyCode::Char('p') => match self.paste_library_item() {
+                Ok(()) => {
+                    self.status = StatusMessage::success("Moved library item.");
+                }
+                Err(error) => self.status = StatusMessage::error(error),
+            },
+            KeyCode::Esc => {
+                if self.library_clipboard.take().is_some() {
+                    self.status = StatusMessage::info("Canceled the pending move.");
                 }
             }
             _ => {}
@@ -1317,7 +1407,7 @@ impl AppState {
 
     fn any_text_editing(&self) -> bool {
         match self.screen {
-            Screen::Main => self.request_editing,
+            Screen::Main => self.request_editing || self.folder_name_prompt.is_some(),
             Screen::Settings => self.settings.editing,
         }
     }
@@ -1325,7 +1415,8 @@ impl AppState {
     fn is_editable_text_field_active_for_paste(&self) -> bool {
         match self.screen {
             Screen::Main => {
-                self.focus == Pane::Request && self.request_field != RequestField::Method
+                self.folder_name_prompt.is_some()
+                    || (self.focus == Pane::Request && self.request_field != RequestField::Method)
             }
             Screen::Settings => {
                 self.settings.focus == SettingsFocus::Detail
@@ -1336,83 +1427,103 @@ impl AppState {
     }
 
     fn persist_library(&self) -> Result<(), String> {
-        storage::save_library(
-            &self.storage_path,
-            &LibraryFile {
-                version: crate::model::CURRENT_LIBRARY_VERSION,
-                requests: self.library.clone(),
-            },
-        )
-        .map_err(|error| error.to_string())
+        storage::save_library(&self.storage_path, &LibraryFile::from(self.library.clone()))
+            .map_err(|error| error.to_string())
     }
 
     fn persist_sync_file(&self) -> Result<(), String> {
         storage::save_sync_file(&self.sync_path, &self.sync.file).map_err(|error| error.to_string())
     }
 
-    fn apply_synced_library(&mut self, new_library: Vec<SavedRequest>) {
+    fn commit_library_change(&mut self) -> Result<(), String> {
+        self.library.normalize();
+        self.library_revision = self.library_revision.saturating_add(1);
+        self.sync_library_context();
+        self.persist_library()?;
+        if self.is_sync_enabled() {
+            self.sync.file.state.dirty = true;
+            let _ = self.persist_sync_file();
+            self.recalculate_sync_status();
+        }
+        Ok(())
+    }
+
+    fn apply_synced_library(&mut self, new_library: LibraryData) {
         let current_loaded_id = self.draft.loaded_request_id;
         let request_was_editing = self.request_editing;
-        self.library = new_library;
-
-        self.selected_index = current_loaded_id
-            .and_then(|id| self.library.iter().position(|request| request.id == id))
-            .or_else(|| (!self.library.is_empty()).then_some(0));
+        let pending_move = self.library_clipboard;
+        self.library = new_library.normalized();
+        self.current_folder_id = self
+            .current_folder_id
+            .filter(|folder_id| self.folder_exists(*folder_id));
+        self.sync_library_context();
+        self.library_clipboard = pending_move.filter(|item| self.library_contains_item(*item));
 
         if request_was_editing {
+            if let Some(request) = current_loaded_id.and_then(|id| self.request_by_id(id)) {
+                self.draft.folder_id = request.folder_id;
+            }
             return;
         }
 
         if let Some(id) = current_loaded_id {
-            if let Some(request) = self
-                .library
-                .iter()
-                .find(|request| request.id == id)
-                .cloned()
-            {
+            if let Some(request) = self.request_by_id(id).cloned() {
+                self.current_folder_id = self.sanitize_folder_reference(request.folder_id);
+                self.selected_library_item = Some(LibraryItemKey::Request(id));
+                self.sync_library_context();
                 self.draft = RequestEditor::from_saved_request(&request);
                 return;
             }
         }
 
-        if let Some(index) = self.selected_index {
-            if let Some(request) = self.library.get(index).cloned() {
+        if let Some(LibraryItemKey::Request(id)) = self.selected_library_item {
+            if let Some(request) = self.request_by_id(id).cloned() {
                 self.draft = RequestEditor::from_saved_request(&request);
                 return;
             }
         }
 
-        self.draft = RequestEditor::blank();
+        self.draft = RequestEditor::blank_in_folder(self.current_folder_id);
     }
 
-    fn select_next_request(&mut self) {
-        let Some(current) = self.selected_index else {
+    fn select_next_library_item(&mut self) {
+        let visible = self.visible_library_keys();
+        let Some(current) = self.selected_library_item else {
+            return;
+        };
+        let Some(index) = visible.iter().position(|item| *item == current) else {
             return;
         };
 
-        if current + 1 < self.library.len() {
-            self.selected_index = Some(current + 1);
+        if index + 1 < visible.len() {
+            self.selected_library_item = Some(visible[index + 1]);
         }
     }
 
-    fn select_previous_request(&mut self) {
-        let Some(current) = self.selected_index else {
+    fn select_previous_library_item(&mut self) {
+        let visible = self.visible_library_keys();
+        let Some(current) = self.selected_library_item else {
+            return;
+        };
+        let Some(index) = visible.iter().position(|item| *item == current) else {
             return;
         };
 
-        if current > 0 {
-            self.selected_index = Some(current - 1);
+        if index > 0 {
+            self.selected_library_item = Some(visible[index - 1]);
         }
     }
 
     fn load_selected_request(&mut self) -> bool {
-        let Some(index) = self.selected_index else {
+        let Some(LibraryItemKey::Request(id)) = self.selected_library_item else {
             return false;
         };
-        let Some(request) = self.library.get(index).cloned() else {
+        let Some(request) = self.request_by_id(id).cloned() else {
             return false;
         };
 
+        self.current_folder_id = self.sanitize_folder_reference(request.folder_id);
+        self.selected_library_item = Some(LibraryItemKey::Request(id));
         self.draft = RequestEditor::from_saved_request(&request);
         true
     }
@@ -1421,7 +1532,7 @@ impl AppState {
         self.focus = Pane::Request;
         self.request_field = RequestField::Title;
         self.request_editing = false;
-        self.draft = RequestEditor::blank();
+        self.draft = RequestEditor::blank_in_folder(self.current_folder_id);
         self.status = StatusMessage::info("Created a new request draft.");
     }
 
@@ -1429,9 +1540,11 @@ impl AppState {
         let title = self.draft.optional_title();
         let headers = self.draft.parsed_headers()?;
         validate_json_body(&self.draft.body_text())?;
+        let folder_id = self.sanitize_folder_reference(self.draft.folder_id);
 
         let saved = SavedRequest {
             id: self.draft.loaded_request_id.unwrap_or_else(Uuid::new_v4),
+            folder_id,
             title,
             method: self.draft.method,
             url: self.draft.url_text(),
@@ -1442,30 +1555,312 @@ impl AppState {
         let created_new = match self
             .draft
             .loaded_request_id
-            .and_then(|id| self.library.iter().position(|request| request.id == id))
+            .and_then(|id| self.request_index(id))
         {
             Some(index) => {
-                self.library[index] = saved.clone();
-                self.selected_index = Some(index);
+                self.library.requests[index] = saved.clone();
                 false
             }
             None => {
-                self.library.push(saved.clone());
-                self.selected_index = Some(self.library.len() - 1);
+                self.library.requests.push(saved.clone());
                 true
             }
         };
 
-        self.library_revision = self.library_revision.saturating_add(1);
+        self.current_folder_id = saved.folder_id;
+        self.selected_library_item = Some(LibraryItemKey::Request(saved.id));
         self.draft = RequestEditor::from_saved_request(&saved);
-        self.persist_library()?;
-        if self.is_sync_enabled() {
-            self.sync.file.state.dirty = true;
-            let _ = self.persist_sync_file();
-            self.recalculate_sync_status();
-        }
+        self.commit_library_change()?;
 
         Ok(created_new)
+    }
+
+    fn handle_folder_prompt_key(&mut self, key: KeyEvent) -> bool {
+        if self.folder_name_prompt.is_none() {
+            return false;
+        }
+
+        match key.code {
+            KeyCode::Esc => {
+                self.folder_name_prompt = None;
+                self.status = StatusMessage::info("Canceled folder creation.");
+            }
+            KeyCode::Enter => match self.finish_folder_creation() {
+                Ok(()) => {
+                    self.status = StatusMessage::success("Created folder.");
+                }
+                Err(error) => {
+                    self.status = StatusMessage::error(error);
+                }
+            },
+            _ => {
+                if let Some(prompt) = self.folder_name_prompt.as_mut() {
+                    handle_single_line_key(&mut prompt.input, key);
+                }
+            }
+        }
+
+        true
+    }
+
+    fn start_folder_creation(&mut self) {
+        self.folder_name_prompt = Some(FolderNamePrompt::new(self.current_folder_id));
+        self.status = StatusMessage::info("Naming new folder. Press Enter to create it.");
+    }
+
+    fn finish_folder_creation(&mut self) -> Result<(), String> {
+        let Some(prompt) = self.folder_name_prompt.as_ref() else {
+            return Err("No folder creation is in progress.".to_string());
+        };
+
+        let name = prompt.name();
+        let parent_id = prompt.parent_id;
+        if name.trim().is_empty() {
+            return Err("Folder names cannot be empty.".to_string());
+        }
+        if self.has_folder_named(parent_id, &name) {
+            return Err("A folder with that name already exists here.".to_string());
+        }
+
+        let folder = SavedFolder {
+            id: Uuid::new_v4(),
+            name,
+            parent_id,
+        };
+        self.folder_name_prompt = None;
+        self.library.folders.push(folder.clone());
+        self.selected_library_item = Some(LibraryItemKey::Folder(folder.id));
+        self.commit_library_change()?;
+        Ok(())
+    }
+
+    fn cut_selected_library_item(&mut self) -> Result<(), String> {
+        let Some(item) = self.selected_library_item else {
+            return Err("Select a library item first.".to_string());
+        };
+        self.library_clipboard = Some(item);
+        Ok(())
+    }
+
+    fn paste_library_item(&mut self) -> Result<(), String> {
+        let Some(item) = self.library_clipboard else {
+            return Err("Cut a library item first with `x`.".to_string());
+        };
+
+        match item {
+            LibraryItemKey::Request(request_id) => {
+                let destination = self.current_folder_id;
+                let request = self
+                    .request_by_id_mut(request_id)
+                    .ok_or_else(|| "The cut request no longer exists.".to_string())?;
+                request.folder_id = destination;
+                if self.draft.loaded_request_id == Some(request_id) {
+                    self.draft.folder_id = destination;
+                }
+            }
+            LibraryItemKey::Folder(folder_id) => {
+                let destination = self.current_folder_id;
+                if self.folder_is_ancestor(folder_id, destination) {
+                    return Err(
+                        "A folder cannot be moved into itself or one of its descendants."
+                            .to_string(),
+                    );
+                }
+                let folder = self
+                    .folder_by_id_mut(folder_id)
+                    .ok_or_else(|| "The cut folder no longer exists.".to_string())?;
+                folder.parent_id = destination;
+            }
+        }
+
+        self.selected_library_item = Some(item);
+        self.library_clipboard = None;
+        self.commit_library_change()?;
+        Ok(())
+    }
+
+    fn open_folder(&mut self, folder_id: Uuid) -> bool {
+        if !self.folder_exists(folder_id) {
+            return false;
+        }
+        self.current_folder_id = Some(folder_id);
+        self.selected_library_item = None;
+        self.sync_library_context();
+        true
+    }
+
+    fn navigate_to_parent_folder(&mut self) -> bool {
+        let Some(current_folder_id) = self.current_folder_id else {
+            return false;
+        };
+        let Some(parent_id) = self
+            .folder_by_id(current_folder_id)
+            .map(|folder| folder.parent_id)
+        else {
+            self.current_folder_id = None;
+            self.sync_library_context();
+            return true;
+        };
+
+        self.current_folder_id = parent_id;
+        self.selected_library_item = Some(LibraryItemKey::Folder(current_folder_id));
+        self.sync_library_context();
+        true
+    }
+
+    fn visible_library_keys(&self) -> Vec<LibraryItemKey> {
+        let mut items = self
+            .library
+            .folders
+            .iter()
+            .filter(|folder| folder.parent_id == self.current_folder_id)
+            .map(|folder| LibraryItemKey::Folder(folder.id))
+            .collect::<Vec<_>>();
+        items.extend(
+            self.library
+                .requests
+                .iter()
+                .filter(|request| request.folder_id == self.current_folder_id)
+                .map(|request| LibraryItemKey::Request(request.id)),
+        );
+        items
+    }
+
+    pub fn visible_library_items(&self) -> Vec<LibraryListItem> {
+        self.visible_library_keys()
+            .into_iter()
+            .filter_map(|item| match item {
+                LibraryItemKey::Folder(id) => self.folder_by_id(id).map(|folder| LibraryListItem {
+                    key: item,
+                    label: format!("[dir] {}/", folder.display_name()),
+                    is_cut: self.library_clipboard == Some(item),
+                }),
+                LibraryItemKey::Request(id) => {
+                    self.request_by_id(id).map(|request| LibraryListItem {
+                        key: item,
+                        label: request.display_name(),
+                        is_cut: self.library_clipboard == Some(item),
+                    })
+                }
+            })
+            .collect()
+    }
+
+    pub fn library_selection_index(&self) -> Option<usize> {
+        let selected = self.selected_library_item?;
+        self.visible_library_keys()
+            .iter()
+            .position(|item| *item == selected)
+    }
+
+    pub fn library_breadcrumb(&self) -> String {
+        let mut names = vec!["Root".to_string()];
+        let mut chain = Vec::new();
+        let mut current = self.current_folder_id;
+        while let Some(folder_id) = current {
+            let Some(folder) = self.folder_by_id(folder_id) else {
+                break;
+            };
+            chain.push(folder.display_name());
+            current = folder.parent_id;
+        }
+        chain.reverse();
+        names.extend(chain);
+        names.join(" / ")
+    }
+
+    pub fn library_is_empty(&self) -> bool {
+        self.library.folders.is_empty() && self.library.requests.is_empty()
+    }
+
+    pub fn library_has_pending_move(&self) -> bool {
+        self.library_clipboard.is_some()
+    }
+
+    fn sync_library_context(&mut self) {
+        self.current_folder_id = self.sanitize_folder_reference(self.current_folder_id);
+        let visible = self.visible_library_keys();
+        if visible.is_empty() {
+            self.selected_library_item = None;
+            return;
+        }
+        if self
+            .selected_library_item
+            .is_some_and(|item| visible.contains(&item))
+        {
+            return;
+        }
+        self.selected_library_item = Some(visible[0]);
+    }
+
+    fn request_index(&self, request_id: Uuid) -> Option<usize> {
+        self.library
+            .requests
+            .iter()
+            .position(|request| request.id == request_id)
+    }
+
+    fn request_by_id(&self, request_id: Uuid) -> Option<&SavedRequest> {
+        self.library
+            .requests
+            .iter()
+            .find(|request| request.id == request_id)
+    }
+
+    fn request_by_id_mut(&mut self, request_id: Uuid) -> Option<&mut SavedRequest> {
+        self.library
+            .requests
+            .iter_mut()
+            .find(|request| request.id == request_id)
+    }
+
+    fn folder_by_id(&self, folder_id: Uuid) -> Option<&SavedFolder> {
+        self.library
+            .folders
+            .iter()
+            .find(|folder| folder.id == folder_id)
+    }
+
+    fn folder_by_id_mut(&mut self, folder_id: Uuid) -> Option<&mut SavedFolder> {
+        self.library
+            .folders
+            .iter_mut()
+            .find(|folder| folder.id == folder_id)
+    }
+
+    fn folder_exists(&self, folder_id: Uuid) -> bool {
+        self.folder_by_id(folder_id).is_some()
+    }
+
+    fn sanitize_folder_reference(&self, folder_id: Option<Uuid>) -> Option<Uuid> {
+        folder_id.filter(|folder_id| self.folder_exists(*folder_id))
+    }
+
+    fn library_contains_item(&self, item: LibraryItemKey) -> bool {
+        match item {
+            LibraryItemKey::Folder(folder_id) => self.folder_exists(folder_id),
+            LibraryItemKey::Request(request_id) => self.request_by_id(request_id).is_some(),
+        }
+    }
+
+    fn has_folder_named(&self, parent_id: Option<Uuid>, name: &str) -> bool {
+        self.library
+            .folders
+            .iter()
+            .any(|folder| folder.parent_id == parent_id && folder.name.eq_ignore_ascii_case(name))
+    }
+
+    fn folder_is_ancestor(&self, folder_id: Uuid, candidate_parent: Option<Uuid>) -> bool {
+        let mut current = candidate_parent;
+        while let Some(parent_id) = current {
+            if parent_id == folder_id {
+                return true;
+            }
+            current = self
+                .folder_by_id(parent_id)
+                .and_then(|folder| folder.parent_id);
+        }
+        false
     }
 
     fn send_current_request(&mut self, sender: &AppEventSender) -> Result<(), String> {
@@ -1658,9 +2053,25 @@ impl AppState {
     }
 }
 
+fn first_library_item(library: &LibraryData, parent_id: Option<Uuid>) -> Option<LibraryItemKey> {
+    library
+        .folders
+        .iter()
+        .find(|folder| folder.parent_id == parent_id)
+        .map(|folder| LibraryItemKey::Folder(folder.id))
+        .or_else(|| {
+            library
+                .requests
+                .iter()
+                .find(|request| request.folder_id == parent_id)
+                .map(|request| LibraryItemKey::Request(request.id))
+        })
+}
+
 #[derive(Debug)]
 pub struct RequestEditor {
     pub loaded_request_id: Option<Uuid>,
+    pub folder_id: Option<Uuid>,
     pub method: HttpMethod,
     pub title: TextArea<'static>,
     pub url: TextArea<'static>,
@@ -1670,8 +2081,13 @@ pub struct RequestEditor {
 
 impl RequestEditor {
     pub fn blank() -> Self {
+        Self::blank_in_folder(None)
+    }
+
+    pub fn blank_in_folder(folder_id: Option<Uuid>) -> Self {
         Self {
             loaded_request_id: None,
+            folder_id,
             method: HttpMethod::Get,
             title: single_line_area(""),
             url: single_line_area(""),
@@ -1683,6 +2099,7 @@ impl RequestEditor {
     pub fn from_saved_request(request: &SavedRequest) -> Self {
         Self {
             loaded_request_id: Some(request.id),
+            folder_id: request.folder_id,
             method: request.method,
             title: single_line_area(request.title.as_deref().unwrap_or("")),
             url: single_line_area(&request.url),
@@ -1869,6 +2286,7 @@ mod tests {
     fn sample_request() -> SavedRequest {
         SavedRequest {
             id: Uuid::new_v4(),
+            folder_id: None,
             title: Some("Example".to_string()),
             method: HttpMethod::Get,
             url: "https://example.com".to_string(),
@@ -1899,6 +2317,7 @@ mod tests {
             dir.path().join("sync.json"),
             LibraryFile {
                 version: crate::model::CURRENT_LIBRARY_VERSION,
+                folders: vec![],
                 requests: vec![request.clone()],
             },
             SyncFile::default(),
@@ -1929,9 +2348,81 @@ mod tests {
         let persisted = storage::load_library(&path).unwrap();
 
         assert!(created_new);
-        assert_eq!(app.library.len(), 1);
+        assert_eq!(app.library.requests.len(), 1);
         assert_eq!(persisted.requests.len(), 1);
         assert_eq!(persisted.requests[0].url, "https://example.com/api");
+    }
+
+    #[test]
+    fn creates_requests_inside_the_current_folder() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("library.json");
+        let folder_id = Uuid::new_v4();
+        let mut app = AppState::new(
+            path.clone(),
+            dir.path().join("sync.json"),
+            LibraryFile {
+                version: crate::model::CURRENT_LIBRARY_VERSION,
+                folders: vec![SavedFolder {
+                    id: folder_id,
+                    name: "Auth".to_string(),
+                    parent_id: None,
+                }],
+                requests: vec![],
+            },
+            SyncFile::default(),
+        );
+
+        assert!(app.open_folder(folder_id));
+
+        app.new_request();
+        app.draft.set_title("Login");
+        app.draft.set_url("https://example.com/login");
+        app.draft.set_body("{}");
+
+        app.save_current_request().unwrap();
+
+        assert_eq!(app.library.requests.len(), 1);
+        assert_eq!(app.library.requests[0].folder_id, Some(folder_id));
+
+        let persisted = storage::load_library(&path).unwrap();
+        assert_eq!(persisted.requests[0].folder_id, Some(folder_id));
+    }
+
+    #[test]
+    fn moves_requests_into_folders() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("library.json");
+        let folder_id = Uuid::new_v4();
+        let request = sample_request();
+        let request_id = request.id;
+        let mut app = AppState::new(
+            path.clone(),
+            dir.path().join("sync.json"),
+            LibraryFile {
+                version: crate::model::CURRENT_LIBRARY_VERSION,
+                folders: vec![SavedFolder {
+                    id: folder_id,
+                    name: "Auth".to_string(),
+                    parent_id: None,
+                }],
+                requests: vec![request],
+            },
+            SyncFile::default(),
+        );
+
+        app.selected_library_item = Some(LibraryItemKey::Request(request_id));
+        app.cut_selected_library_item().unwrap();
+        assert!(app.open_folder(folder_id));
+        app.paste_library_item().unwrap();
+
+        assert_eq!(
+            app.request_by_id(request_id).unwrap().folder_id,
+            Some(folder_id)
+        );
+
+        let persisted = storage::load_library(&path).unwrap();
+        assert_eq!(persisted.requests[0].folder_id, Some(folder_id));
     }
 
     #[test]
@@ -1944,6 +2435,7 @@ mod tests {
             dir.path().join("sync.json"),
             LibraryFile {
                 version: crate::model::CURRENT_LIBRARY_VERSION,
+                folders: vec![],
                 requests: vec![request],
             },
             SyncFile::default(),

@@ -8,7 +8,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
 use std::io::{self, Stdout};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -56,6 +56,10 @@ pub fn draw(frame: &mut Frame<'_>, app: &AppState) {
     match app.screen {
         Screen::Main => render_main_screen(frame, layout[1], app),
         Screen::Settings => render_settings_screen(frame, layout[1], app),
+    }
+
+    if app.screen == Screen::Main && app.folder_name_prompt.is_some() {
+        render_folder_prompt(frame, app);
     }
 }
 
@@ -231,17 +235,71 @@ fn render_library(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    if app.library.is_empty() {
-        let placeholder = Paragraph::new("No saved requests yet.\nPress `n` to create one.")
-            .wrap(Wrap { trim: false });
-        frame.render_widget(placeholder, inner);
+    let sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(2), Constraint::Min(0)])
+        .split(inner);
+
+    let mut header = vec![Line::from(vec![
+        Span::styled("Path:", Style::default().fg(TEXT_MUTED)),
+        Span::raw(" "),
+        Span::styled(app.library_breadcrumb(), Style::default().fg(ACCENT_BLUE)),
+    ])];
+    if app.library_has_pending_move() {
+        header.push(Line::from(vec![
+            Span::styled("Move:", Style::default().fg(TEXT_MUTED)),
+            Span::raw(" "),
+            Span::styled(
+                "press `p` to paste or `Esc` to cancel",
+                Style::default().fg(ACCENT_AMBER),
+            ),
+        ]));
+    } else {
+        header.push(Line::from(vec![
+            Span::styled("Edit:", Style::default().fg(TEXT_MUTED)),
+            Span::raw(" "),
+            Span::styled(
+                "`f` folder  `x` cut  `p` paste",
+                Style::default().fg(TEXT_MUTED),
+            ),
+        ]));
+    }
+    frame.render_widget(
+        Paragraph::new(header).wrap(Wrap { trim: false }),
+        sections[0],
+    );
+
+    if app.library_is_empty() {
+        let placeholder = Paragraph::new(
+            "No saved items yet.\nPress `n` to create a request or `f` to create a folder.",
+        )
+        .wrap(Wrap { trim: false });
+        frame.render_widget(placeholder, sections[1]);
         return;
     }
 
-    let items = app
-        .library
+    let library_items = app.visible_library_items();
+    if library_items.is_empty() {
+        let placeholder = Paragraph::new(
+            "This folder is empty.\nPress `n` to create a request or `f` to create a folder.",
+        )
+        .wrap(Wrap { trim: false });
+        frame.render_widget(placeholder, sections[1]);
+        return;
+    }
+
+    let items = library_items
         .iter()
-        .map(|request| ListItem::new(request.display_name()))
+        .map(|item| {
+            let style = if item.is_cut {
+                Style::default().fg(ACCENT_AMBER)
+            } else if matches!(item.key, crate::app::LibraryItemKey::Folder(_)) {
+                Style::default().fg(ACCENT_CYAN)
+            } else {
+                Style::default()
+            };
+            ListItem::new(item.label.clone()).style(style)
+        })
         .collect::<Vec<_>>();
 
     let list = List::new(items)
@@ -249,8 +307,39 @@ fn render_library(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
         .highlight_symbol("> ");
 
     let mut state = ListState::default();
-    state.select(app.selected_index);
-    frame.render_stateful_widget(list, inner, &mut state);
+    state.select(app.library_selection_index());
+    frame.render_stateful_widget(list, sections[1], &mut state);
+}
+
+fn render_folder_prompt(frame: &mut Frame<'_>, app: &AppState) {
+    let Some(prompt) = app.folder_name_prompt.as_ref() else {
+        return;
+    };
+
+    let area = centered_rect(frame.area(), 60, 7);
+    frame.render_widget(Clear, area);
+    let block = field_block("New Folder", true, true);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Min(1),
+            Constraint::Length(1),
+        ])
+        .split(inner);
+    frame.render_widget(
+        Paragraph::new(format!("Create in {}", app.library_breadcrumb()))
+            .style(Style::default().fg(TEXT_MUTED)),
+        rows[0],
+    );
+    frame.render_widget(&prompt.input, rows[1]);
+    frame.render_widget(
+        Paragraph::new("Enter create  Esc cancel").style(Style::default().fg(TEXT_MUTED)),
+        rows[2],
+    );
 }
 
 fn render_request_editor(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
@@ -936,6 +1025,26 @@ fn sync_status_style(status: &str) -> Style {
     }
 }
 
+fn centered_rect(area: Rect, width_percent: u16, height: u16) -> Rect {
+    let vertical = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(0),
+            Constraint::Length(height),
+            Constraint::Min(0),
+        ])
+        .split(area);
+    let horizontal = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage((100 - width_percent) / 2),
+            Constraint::Percentage(width_percent),
+            Constraint::Percentage((100 - width_percent) / 2),
+        ])
+        .split(vertical[1]);
+    horizontal[1]
+}
+
 fn controls_for_screen(screen: Screen) -> &'static [&'static str] {
     match screen {
         Screen::Main => &[
@@ -943,6 +1052,8 @@ fn controls_for_screen(screen: Screen) -> &'static [&'static str] {
             "Tab Panes",
             "←→ Trace/Body/Headers",
             "Enter Edit/Load",
+            "f Folder",
+            "x/p Move",
             "Ctrl+V Paste",
             "Ctrl+S Save",
             "Ctrl+R Send",

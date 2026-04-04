@@ -1,4 +1,4 @@
-use crate::model::{CURRENT_LIBRARY_VERSION, LibraryFile};
+use crate::model::{CURRENT_LIBRARY_VERSION, LibraryData, LibraryFile};
 use crate::sync::{SYNC_FILE_VERSION, SyncFile};
 use directories::ProjectDirs;
 use std::fmt;
@@ -72,11 +72,13 @@ pub fn load_library(path: &Path) -> Result<LibraryFile, StorageError> {
     }
 
     let file: LibraryFile = serde_json::from_str(&content)?;
-    if file.version != CURRENT_LIBRARY_VERSION {
-        return Err(StorageError::UnsupportedVersion(file.version));
+    match file.version {
+        1 | CURRENT_LIBRARY_VERSION => {
+            let library = LibraryData::from(file).normalized();
+            Ok(LibraryFile::from(library))
+        }
+        version => Err(StorageError::UnsupportedVersion(version)),
     }
-
-    Ok(file)
 }
 
 pub fn save_library(path: &Path, file: &LibraryFile) -> Result<(), StorageError> {
@@ -129,8 +131,10 @@ mod tests {
         let path = dir.path().join("library.json");
         let file = LibraryFile {
             version: CURRENT_LIBRARY_VERSION,
+            folders: vec![],
             requests: vec![SavedRequest {
                 id: Uuid::new_v4(),
+                folder_id: None,
                 title: Some("Example".to_string()),
                 method: HttpMethod::Post,
                 url: "https://example.com".to_string(),
@@ -168,6 +172,36 @@ mod tests {
     }
 
     #[test]
+    fn migrates_flat_v1_library_files() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("library.json");
+        fs::write(
+            &path,
+            r#"{
+  "version": 1,
+  "requests": [
+    {
+      "id": "00000000-0000-0000-0000-000000000001",
+      "title": "Example",
+      "method": "Get",
+      "url": "https://example.com",
+      "headers": [],
+      "json_body": "{}"
+    }
+  ]
+}"#,
+        )
+        .unwrap();
+
+        let file = load_library(&path).unwrap();
+
+        assert_eq!(file.version, CURRENT_LIBRARY_VERSION);
+        assert!(file.folders.is_empty());
+        assert_eq!(file.requests.len(), 1);
+        assert_eq!(file.requests[0].folder_id, None);
+    }
+
+    #[test]
     fn round_trips_sync_json() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("sync.json");
@@ -184,6 +218,7 @@ mod tests {
             state: SyncState {
                 last_head_sha: Some("abc123".to_string()),
                 last_synced_hash: Default::default(),
+                last_synced_folder_hash: Default::default(),
                 last_success_at: Some("2026-03-20T12:00:00Z".to_string()),
                 dirty: false,
             },

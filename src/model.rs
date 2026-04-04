@@ -1,9 +1,10 @@
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use url::Url;
 use uuid::Uuid;
 
-pub const CURRENT_LIBRARY_VERSION: u32 = 1;
+pub const CURRENT_LIBRARY_VERSION: u32 = 2;
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub enum HttpMethod {
@@ -77,6 +78,8 @@ pub struct HeaderEntry {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct SavedRequest {
     pub id: Uuid,
+    #[serde(default)]
+    pub folder_id: Option<Uuid>,
     pub title: Option<String>,
     pub method: HttpMethod,
     pub url: String,
@@ -95,6 +98,20 @@ impl SavedRequest {
             Some(title) => format!("{title} [{}]", self.method),
             None => format!("{} {}", self.method, self.url),
         }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SavedFolder {
+    pub id: Uuid,
+    pub name: String,
+    #[serde(default)]
+    pub parent_id: Option<Uuid>,
+}
+
+impl SavedFolder {
+    pub fn display_name(&self) -> String {
+        self.name.trim().to_string()
     }
 }
 
@@ -121,9 +138,52 @@ impl RequestInput {
     }
 }
 
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct LibraryData {
+    #[serde(default)]
+    pub folders: Vec<SavedFolder>,
+    #[serde(default)]
+    pub requests: Vec<SavedRequest>,
+}
+
+impl LibraryData {
+    pub fn normalized(mut self) -> Self {
+        self.normalize();
+        self
+    }
+
+    pub fn normalize(&mut self) {
+        let parent_lookup = self
+            .folders
+            .iter()
+            .map(|folder| (folder.id, folder.parent_id))
+            .collect::<HashMap<_, _>>();
+        let folder_ids = parent_lookup.keys().copied().collect::<HashSet<_>>();
+
+        for folder in &mut self.folders {
+            if !folder_parent_is_valid(folder.id, folder.parent_id, &parent_lookup, &folder_ids) {
+                folder.parent_id = None;
+            }
+            folder.name = folder.display_name();
+        }
+
+        for request in &mut self.requests {
+            if !request
+                .folder_id
+                .is_none_or(|folder_id| folder_ids.contains(&folder_id))
+            {
+                request.folder_id = None;
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct LibraryFile {
     pub version: u32,
+    #[serde(default)]
+    pub folders: Vec<SavedFolder>,
+    #[serde(default)]
     pub requests: Vec<SavedRequest>,
 }
 
@@ -131,9 +191,48 @@ impl Default for LibraryFile {
     fn default() -> Self {
         Self {
             version: CURRENT_LIBRARY_VERSION,
+            folders: Vec::new(),
             requests: Vec::new(),
         }
     }
+}
+
+impl From<LibraryFile> for LibraryData {
+    fn from(file: LibraryFile) -> Self {
+        Self {
+            folders: file.folders,
+            requests: file.requests,
+        }
+    }
+}
+
+impl From<LibraryData> for LibraryFile {
+    fn from(library: LibraryData) -> Self {
+        Self {
+            version: CURRENT_LIBRARY_VERSION,
+            folders: library.folders,
+            requests: library.requests,
+        }
+    }
+}
+
+fn folder_parent_is_valid(
+    folder_id: Uuid,
+    parent_id: Option<Uuid>,
+    parent_lookup: &HashMap<Uuid, Option<Uuid>>,
+    folder_ids: &HashSet<Uuid>,
+) -> bool {
+    let mut seen = HashSet::new();
+    let mut current = parent_id;
+
+    while let Some(id) = current {
+        if id == folder_id || !folder_ids.contains(&id) || !seen.insert(id) {
+            return false;
+        }
+        current = parent_lookup.get(&id).copied().flatten();
+    }
+
+    true
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

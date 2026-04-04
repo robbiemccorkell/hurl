@@ -1,4 +1,4 @@
-use crate::model::SavedRequest;
+use crate::model::{LibraryData, SavedFolder, SavedRequest};
 use anyhow::Context;
 use argon2::{Algorithm, Argon2, Params, Version};
 use base64::Engine;
@@ -30,6 +30,7 @@ const LEGACY_TOKEN_SERVICE: &str = "hurl.github.sync.token";
 const LEGACY_PASSWORD_SERVICE: &str = "hurl.github.sync.password";
 const LEGACY_SECRET_ACCOUNT: &str = "default";
 const MANIFEST_PATH: &str = "manifest.json";
+const FOLDERS_DIR: &str = "folders";
 const REQUESTS_DIR: &str = "requests";
 const ENVELOPE_VERSION: u32 = 1;
 const ARGON2_MEMORY_KIB: u32 = 65_536;
@@ -81,6 +82,8 @@ impl Default for SyncConfig {
 pub struct SyncState {
     pub last_head_sha: Option<String>,
     pub last_synced_hash: BTreeMap<Uuid, String>,
+    #[serde(default)]
+    pub last_synced_folder_hash: BTreeMap<Uuid, String>,
     pub last_success_at: Option<String>,
     pub dirty: bool,
 }
@@ -157,7 +160,7 @@ pub enum SecretPersistence {
 pub struct SyncRunOutput {
     pub config: SyncConfig,
     pub state: SyncState,
-    pub library: Vec<SavedRequest>,
+    pub library: LibraryData,
     pub imported_count: usize,
     pub uploaded_count: usize,
     pub conflict_count: usize,
@@ -165,8 +168,8 @@ pub struct SyncRunOutput {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct MergeResult {
-    pub library: Vec<SavedRequest>,
+pub struct RequestMergeResult {
+    pub requests: Vec<SavedRequest>,
     pub hashes: BTreeMap<Uuid, String>,
     pub upload_ids: Vec<Uuid>,
     pub imported_count: usize,
@@ -174,11 +177,22 @@ pub struct MergeResult {
     pub warning: Option<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FolderMergeResult {
+    pub folders: Vec<SavedFolder>,
+    pub hashes: BTreeMap<Uuid, String>,
+    pub upload_ids: Vec<Uuid>,
+    pub imported_count: usize,
+    pub warning: Option<String>,
+}
+
 #[derive(Clone, Debug)]
 struct RemoteSnapshot {
     manifest: RepoManifest,
     requests: BTreeMap<Uuid, SavedRequest>,
+    folders: BTreeMap<Uuid, SavedFolder>,
     request_shas: HashMap<Uuid, String>,
+    folder_shas: HashMap<Uuid, String>,
     head_sha: Option<String>,
 }
 
@@ -383,6 +397,51 @@ pub fn decrypt_request(envelope_json: &str, key_bytes: &[u8; 32]) -> Result<Save
         .map_err(|error| format!("Failed to deserialize synced request: {error}"))
 }
 
+pub fn encrypt_folder(
+    folder: &SavedFolder,
+    key_bytes: &[u8; 32],
+) -> Result<EncryptedEnvelope, String> {
+    let plaintext = serde_json::to_vec(folder)
+        .map_err(|error| format!("Failed to serialize folder for sync: {error}"))?;
+    let cipher = XChaCha20Poly1305::new(Key::from_slice(key_bytes));
+    let mut nonce_bytes = [0_u8; NONCE_BYTES];
+    rand::thread_rng().fill_bytes(&mut nonce_bytes);
+    let ciphertext = cipher
+        .encrypt(XNonce::from_slice(&nonce_bytes), plaintext.as_ref())
+        .map_err(|error| format!("Failed to encrypt folder for sync: {error}"))?;
+    Ok(EncryptedEnvelope {
+        version: ENVELOPE_VERSION,
+        nonce: BASE64.encode(nonce_bytes),
+        ciphertext: BASE64.encode(ciphertext),
+    })
+}
+
+pub fn decrypt_folder(envelope_json: &str, key_bytes: &[u8; 32]) -> Result<SavedFolder, String> {
+    let envelope: EncryptedEnvelope = serde_json::from_str(envelope_json)
+        .map_err(|error| format!("Failed to parse encrypted folder envelope: {error}"))?;
+    if envelope.version != ENVELOPE_VERSION {
+        return Err(format!(
+            "Encrypted folder envelope version {} is not supported.",
+            envelope.version
+        ));
+    }
+    let nonce = BASE64
+        .decode(envelope.nonce.as_bytes())
+        .map_err(|error| format!("Encrypted folder nonce is invalid: {error}"))?;
+    if nonce.len() != NONCE_BYTES {
+        return Err("Encrypted folder nonce has the wrong length.".to_string());
+    }
+    let ciphertext = BASE64
+        .decode(envelope.ciphertext.as_bytes())
+        .map_err(|error| format!("Encrypted folder payload is invalid: {error}"))?;
+    let cipher = XChaCha20Poly1305::new(Key::from_slice(key_bytes));
+    let plaintext = cipher
+        .decrypt(XNonce::from_slice(&nonce), ciphertext.as_ref())
+        .map_err(|_| "Sync password is incorrect or the sync data is corrupted.".to_string())?;
+    serde_json::from_slice(&plaintext)
+        .map_err(|error| format!("Failed to deserialize synced folder: {error}"))
+}
+
 pub fn request_hash(request: &SavedRequest) -> Result<String, String> {
     let bytes = serde_json::to_vec(request)
         .map_err(|error| format!("Failed to hash synced request: {error}"))?;
@@ -390,18 +449,25 @@ pub fn request_hash(request: &SavedRequest) -> Result<String, String> {
     Ok(BASE64.encode(digest))
 }
 
-pub fn merge_libraries(
+pub fn folder_hash(folder: &SavedFolder) -> Result<String, String> {
+    let bytes = serde_json::to_vec(folder)
+        .map_err(|error| format!("Failed to hash synced folder: {error}"))?;
+    let digest = Sha256::digest(bytes);
+    Ok(BASE64.encode(digest))
+}
+
+pub fn merge_requests(
     local_library: &[SavedRequest],
     remote_requests: &BTreeMap<Uuid, SavedRequest>,
     last_synced_hash: &BTreeMap<Uuid, String>,
-) -> Result<MergeResult, String> {
+) -> Result<RequestMergeResult, String> {
     let local_by_id = local_library
         .iter()
         .cloned()
         .map(|request| (request.id, request))
         .collect::<BTreeMap<_, _>>();
-    let remote_hashes = hash_map(remote_requests.values())?;
-    let local_hashes = hash_map(local_library.iter())?;
+    let remote_hashes = request_hash_map(remote_requests.values())?;
+    let local_hashes = request_hash_map(local_library.iter())?;
 
     let mut merged = local_library.to_vec();
     let mut merged_index = merged
@@ -474,7 +540,7 @@ pub fn merge_libraries(
         }
     }
 
-    let merged_hashes = hash_map(merged.iter())?;
+    let merged_hashes = request_hash_map(merged.iter())?;
     let mut upload_ids = Vec::new();
     for request in &merged {
         let merged_hash = merged_hashes
@@ -500,12 +566,129 @@ pub fn merge_libraries(
         None
     };
 
-    Ok(MergeResult {
-        library: merged,
+    Ok(RequestMergeResult {
+        requests: merged,
         hashes: merged_hashes,
         upload_ids,
         imported_count,
         conflict_count,
+        warning,
+    })
+}
+
+pub fn merge_folders(
+    local_folders: &[SavedFolder],
+    remote_folders: &BTreeMap<Uuid, SavedFolder>,
+    last_synced_hash: &BTreeMap<Uuid, String>,
+) -> Result<FolderMergeResult, String> {
+    let local_by_id = local_folders
+        .iter()
+        .cloned()
+        .map(|folder| (folder.id, folder))
+        .collect::<BTreeMap<_, _>>();
+    let remote_hashes = folder_hash_map(remote_folders.values())?;
+    let local_hashes = folder_hash_map(local_folders.iter())?;
+
+    let mut merged = local_folders.to_vec();
+    let mut merged_index = merged
+        .iter()
+        .enumerate()
+        .map(|(index, folder)| (folder.id, index))
+        .collect::<HashMap<_, _>>();
+
+    let mut imported_count = 0;
+    let mut conflict_count = 0;
+    let mut missing_remote_count = 0;
+
+    let mut all_ids = local_by_id.keys().copied().collect::<BTreeSet<_>>();
+    for id in remote_folders.keys().copied() {
+        all_ids.insert(id);
+    }
+
+    for id in all_ids {
+        let local = local_by_id.get(&id);
+        let remote = remote_folders.get(&id);
+        let base_hash = last_synced_hash.get(&id);
+
+        match (local, remote) {
+            (Some(_local_folder), Some(remote_folder)) => {
+                let local_hash = local_hashes
+                    .get(&id)
+                    .ok_or_else(|| "Missing local folder sync hash during merge.".to_string())?;
+                let remote_hash = remote_hashes
+                    .get(&id)
+                    .ok_or_else(|| "Missing remote folder sync hash during merge.".to_string())?;
+
+                if local_hash == remote_hash {
+                    continue;
+                }
+
+                let local_changed = base_hash.map(|hash| hash != local_hash).unwrap_or(true);
+                let remote_changed = base_hash.map(|hash| hash != remote_hash).unwrap_or(true);
+
+                match (local_changed, remote_changed) {
+                    (true, false) => {}
+                    (false, true) => {
+                        replace_folder(&mut merged, &mut merged_index, remote_folder.clone());
+                        imported_count += 1;
+                    }
+                    (true, true) => {
+                        conflict_count += 1;
+                    }
+                    (false, false) => {}
+                }
+            }
+            (Some(_local_folder), None) => {
+                if base_hash.is_some() {
+                    missing_remote_count += 1;
+                }
+            }
+            (None, Some(remote_folder)) => {
+                merged_index.insert(id, merged.len());
+                merged.push(remote_folder.clone());
+                imported_count += 1;
+            }
+            (None, None) => {}
+        }
+    }
+
+    let mut merged_library = LibraryData {
+        folders: merged,
+        requests: Vec::new(),
+    };
+    merged_library.normalize();
+    let merged_folders = merged_library.folders;
+    let merged_hashes = folder_hash_map(merged_folders.iter())?;
+    let mut upload_ids = Vec::new();
+    for folder in &merged_folders {
+        let merged_hash = merged_hashes
+            .get(&folder.id)
+            .ok_or_else(|| "Missing merged folder sync hash after merge.".to_string())?;
+        match remote_hashes.get(&folder.id) {
+            Some(remote_hash) if remote_hash == merged_hash => {}
+            _ => upload_ids.push(folder.id),
+        }
+    }
+
+    let warning = if missing_remote_count > 0 {
+        Some(format!(
+            "Remote sync data was missing {} folder file(s); local copies were preserved.",
+            missing_remote_count
+        ))
+    } else if conflict_count > 0 {
+        Some(format!(
+            "Folder metadata conflicted on {} folder(s); local versions were kept.",
+            conflict_count
+        ))
+    } else {
+        None
+    };
+
+    Ok(FolderMergeResult {
+        folders: merged_folders,
+        hashes: merged_hashes,
+        upload_ids,
+        imported_count,
         warning,
     })
 }
@@ -627,10 +810,11 @@ pub async fn complete_device_flow(
 pub async fn enable_sync(
     mut config: SyncConfig,
     mut state: SyncState,
-    library: Vec<SavedRequest>,
+    mut library: LibraryData,
     access_token: &str,
     password: &str,
 ) -> Result<SyncRunOutput, String> {
+    library.normalize();
     let api = GitHubApi::new()?;
     let repo_info = match api
         .get_repo(access_token, &config.owner, &config.repo)
@@ -700,7 +884,25 @@ pub async fn enable_sync(
         .await?;
 
         let mut uploaded_count = 0;
-        for request in &library {
+        for folder in &library.folders {
+            let envelope = encrypt_folder(folder, &repo_key)?;
+            let path = folder_file_path(folder.id);
+            api.put_file(
+                access_token,
+                &config.owner,
+                &config.repo,
+                &path,
+                serde_json::to_vec(&envelope)
+                    .map_err(|error| format!("Failed to serialize encrypted folder: {error}"))?,
+                None,
+                &config.branch,
+                &format!("hurl sync: save folder {}", folder.id),
+            )
+            .await?;
+            uploaded_count += 1;
+        }
+
+        for request in &library.requests {
             let envelope = encrypt_request(request, &repo_key)?;
             let path = request_file_path(request.id);
             api.put_file(
@@ -712,13 +914,14 @@ pub async fn enable_sync(
                     .map_err(|error| format!("Failed to serialize encrypted request: {error}"))?,
                 None,
                 &config.branch,
-                &format!("hurl sync: save {}", request.id),
+                &format!("hurl sync: save request {}", request.id),
             )
             .await?;
             uploaded_count += 1;
         }
 
-        state.last_synced_hash = hash_map(library.iter())?;
+        state.last_synced_hash = request_hash_map(library.requests.iter())?;
+        state.last_synced_folder_hash = folder_hash_map(library.folders.iter())?;
         state.last_success_at = Some(now_rfc3339()?);
         state.dirty = false;
         state.last_head_sha = api
@@ -742,10 +945,11 @@ pub async fn enable_sync(
 pub async fn sync_library(
     config: SyncConfig,
     mut state: SyncState,
-    library: Vec<SavedRequest>,
+    mut library: LibraryData,
     access_token: &str,
     password: &str,
 ) -> Result<SyncRunOutput, String> {
+    library.normalize();
     let api = GitHubApi::new()?;
     let snapshot = api
         .read_remote_snapshot(
@@ -756,19 +960,52 @@ pub async fn sync_library(
             password,
         )
         .await?;
-    let merge = merge_libraries(&library, &snapshot.requests, &state.last_synced_hash)?;
+    let request_merge = merge_requests(
+        &library.requests,
+        &snapshot.requests,
+        &state.last_synced_hash,
+    )?;
+    let folder_merge = merge_folders(
+        &library.folders,
+        &snapshot.folders,
+        &state.last_synced_folder_hash,
+    )?;
     let repo_key = derive_repo_key(password, &snapshot.manifest)?;
 
-    let merged_by_id = merge
-        .library
+    let merged_requests_by_id = request_merge
+        .requests
         .iter()
         .cloned()
         .map(|request| (request.id, request))
         .collect::<BTreeMap<_, _>>();
 
     let mut uploaded_count = 0;
-    for request_id in &merge.upload_ids {
-        let request = merged_by_id
+    for folder_id in &folder_merge.upload_ids {
+        let folder = folder_merge
+            .folders
+            .iter()
+            .find(|folder| &folder.id == folder_id)
+            .ok_or_else(|| "A merged folder was missing during upload preparation.".to_string())?;
+        let envelope = encrypt_folder(folder, &repo_key)?;
+        let path = folder_file_path(*folder_id);
+        let sha = snapshot.folder_shas.get(folder_id).map(String::as_str);
+        api.put_file(
+            access_token,
+            &config.owner,
+            &config.repo,
+            &path,
+            serde_json::to_vec(&envelope)
+                .map_err(|error| format!("Failed to serialize encrypted folder: {error}"))?,
+            sha,
+            &config.branch,
+            &format!("hurl sync: save folder {}", folder_id),
+        )
+        .await?;
+        uploaded_count += 1;
+    }
+
+    for request_id in &request_merge.upload_ids {
+        let request = merged_requests_by_id
             .get(request_id)
             .ok_or_else(|| "A merged request was missing during upload preparation.".to_string())?;
         let envelope = encrypt_request(request, &repo_key)?;
@@ -783,13 +1020,20 @@ pub async fn sync_library(
                 .map_err(|error| format!("Failed to serialize encrypted request: {error}"))?,
             sha,
             &config.branch,
-            &format!("hurl sync: save {}", request_id),
+            &format!("hurl sync: save request {}", request_id),
         )
         .await?;
         uploaded_count += 1;
     }
 
-    state.last_synced_hash = merge.hashes;
+    let merged_library = LibraryData {
+        folders: folder_merge.folders,
+        requests: request_merge.requests,
+    }
+    .normalized();
+
+    state.last_synced_hash = request_hash_map(merged_library.requests.iter())?;
+    state.last_synced_folder_hash = folder_hash_map(merged_library.folders.iter())?;
     state.last_success_at = Some(now_rfc3339()?);
     state.dirty = false;
     state.last_head_sha = api
@@ -800,11 +1044,11 @@ pub async fn sync_library(
     Ok(SyncRunOutput {
         config,
         state,
-        library: merge.library,
-        imported_count: merge.imported_count,
+        library: merged_library,
+        imported_count: request_merge.imported_count + folder_merge.imported_count,
         uploaded_count,
-        conflict_count: merge.conflict_count,
-        warning: merge.warning,
+        conflict_count: request_merge.conflict_count,
+        warning: combine_warnings([request_merge.warning, folder_merge.warning]),
     })
 }
 
@@ -841,7 +1085,7 @@ fn validate_manifest(manifest: &RepoManifest) -> Result<(), String> {
     Ok(())
 }
 
-fn hash_map<'a, I>(requests: I) -> Result<BTreeMap<Uuid, String>, String>
+fn request_hash_map<'a, I>(requests: I) -> Result<BTreeMap<Uuid, String>, String>
 where
     I: IntoIterator<Item = &'a SavedRequest>,
 {
@@ -850,6 +1094,21 @@ where
         hashes.insert(request.id, request_hash(request)?);
     }
     Ok(hashes)
+}
+
+fn folder_hash_map<'a, I>(folders: I) -> Result<BTreeMap<Uuid, String>, String>
+where
+    I: IntoIterator<Item = &'a SavedFolder>,
+{
+    let mut hashes = BTreeMap::new();
+    for folder in folders {
+        hashes.insert(folder.id, folder_hash(folder)?);
+    }
+    Ok(hashes)
+}
+
+fn folder_file_path(id: Uuid) -> String {
+    format!("{FOLDERS_DIR}/{id}.json.enc")
 }
 
 fn request_file_path(id: Uuid) -> String {
@@ -863,6 +1122,7 @@ fn conflict_copy(request: &SavedRequest) -> SavedRequest {
         .unwrap_or_else(|| request.display_name());
     SavedRequest {
         id: Uuid::new_v4(),
+        folder_id: request.folder_id,
         title: Some(format!("CONFLICT {} - {}", timestamp_slug(), title_base)),
         method: request.method,
         url: request.url.clone(),
@@ -884,6 +1144,25 @@ fn replace_request(
 ) {
     if let Some(index) = merged_index.get(&new_request.id).copied() {
         merged[index] = new_request;
+    }
+}
+
+fn replace_folder(
+    merged: &mut [SavedFolder],
+    merged_index: &mut HashMap<Uuid, usize>,
+    new_folder: SavedFolder,
+) {
+    if let Some(index) = merged_index.get(&new_folder.id).copied() {
+        merged[index] = new_folder;
+    }
+}
+
+fn combine_warnings<const N: usize>(warnings: [Option<String>; N]) -> Option<String> {
+    let warnings = warnings.into_iter().flatten().collect::<Vec<_>>();
+    if warnings.is_empty() {
+        None
+    } else {
+        Some(warnings.join(" "))
     }
 }
 
@@ -1122,6 +1401,35 @@ impl GitHubApi {
 
         let mut requests = BTreeMap::new();
         let mut request_shas = HashMap::new();
+        let mut folders = BTreeMap::new();
+        let mut folder_shas = HashMap::new();
+
+        for entry in self
+            .list_directory(access_token, owner, repo, FOLDERS_DIR, branch)
+            .await?
+            .into_iter()
+            .filter(|entry| entry.kind == "file" && entry.name.ends_with(".json.enc"))
+        {
+            let file = self
+                .get_file(access_token, owner, repo, &entry.path, branch)
+                .await?
+                .ok_or_else(|| {
+                    format!(
+                        "Sync folder file `{}` disappeared during fetch.",
+                        entry.path
+                    )
+                })?;
+            let bytes = decode_contents_file(&file)?;
+            let folder = decrypt_folder(
+                std::str::from_utf8(&bytes).map_err(|error| {
+                    format!("Failed to read synced folder `{}`: {error}", entry.path)
+                })?,
+                &repo_key,
+            )?;
+            folder_shas.insert(folder.id, file.sha);
+            folders.insert(folder.id, folder);
+        }
+
         for entry in self
             .list_directory(access_token, owner, repo, REQUESTS_DIR, branch)
             .await?
@@ -1151,7 +1459,9 @@ impl GitHubApi {
         Ok(RemoteSnapshot {
             manifest,
             requests,
+            folders,
             request_shas,
+            folder_shas,
             head_sha: self
                 .branch_head_sha(access_token, owner, repo, branch)
                 .await?,
@@ -1230,11 +1540,12 @@ fn decode_contents_file(file: &ContentFile) -> Result<Vec<u8>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{HeaderEntry, HttpMethod};
+    use crate::model::{HeaderEntry, HttpMethod, SavedFolder};
 
     fn sample_request(id: Uuid, title: &str, body: &str) -> SavedRequest {
         SavedRequest {
             id,
+            folder_id: None,
             title: Some(title.to_string()),
             method: HttpMethod::Post,
             url: format!("https://example.com/{title}"),
@@ -1243,6 +1554,14 @@ mod tests {
                 value: "application/json".to_string(),
             }],
             json_body: body.to_string(),
+        }
+    }
+
+    fn sample_folder(id: Uuid, name: &str, parent_id: Option<Uuid>) -> SavedFolder {
+        SavedFolder {
+            id,
+            name: name.to_string(),
+            parent_id,
         }
     }
 
@@ -1291,6 +1610,18 @@ mod tests {
     }
 
     #[test]
+    fn encrypts_and_decrypts_folders() {
+        let manifest = create_repo_manifest().unwrap();
+        let key = derive_repo_key("super-secret", &manifest).unwrap();
+        let folder = sample_folder(Uuid::new_v4(), "Auth", None);
+
+        let encrypted = encrypt_folder(&folder, &key).unwrap();
+        let decrypted = decrypt_folder(&serde_json::to_string(&encrypted).unwrap(), &key).unwrap();
+
+        assert_eq!(decrypted, folder);
+    }
+
+    #[test]
     fn merges_non_conflicting_changes() {
         let local_id = Uuid::new_v4();
         let remote_id = Uuid::new_v4();
@@ -1299,13 +1630,25 @@ mod tests {
         let last_synced = BTreeMap::new();
         let remote = BTreeMap::from([(remote_id, remote_request.clone())]);
 
-        let merge = merge_libraries(&[local_request.clone()], &remote, &last_synced).unwrap();
+        let merge = merge_requests(&[local_request.clone()], &remote, &last_synced).unwrap();
 
-        assert_eq!(merge.library.len(), 2);
-        assert!(merge.library.iter().any(|request| request.id == local_id));
-        assert!(merge.library.iter().any(|request| request.id == remote_id));
+        assert_eq!(merge.requests.len(), 2);
+        assert!(merge.requests.iter().any(|request| request.id == local_id));
+        assert!(merge.requests.iter().any(|request| request.id == remote_id));
         assert_eq!(merge.imported_count, 1);
         assert_eq!(merge.conflict_count, 0);
+    }
+
+    #[test]
+    fn merges_remote_only_folders() {
+        let remote_folder = sample_folder(Uuid::new_v4(), "Auth", None);
+        let remote = BTreeMap::from([(remote_folder.id, remote_folder.clone())]);
+
+        let merge = merge_folders(&[], &remote, &BTreeMap::new()).unwrap();
+
+        assert_eq!(merge.folders, vec![remote_folder]);
+        assert_eq!(merge.imported_count, 1);
+        assert!(merge.upload_ids.is_empty());
     }
 
     #[test]
@@ -1319,18 +1662,18 @@ mod tests {
         let last_synced = BTreeMap::from([(id, request_hash(&original).unwrap())]);
         let remote = BTreeMap::from([(id, remote_request.clone())]);
 
-        let merge = merge_libraries(&[local.clone()], &remote, &last_synced).unwrap();
+        let merge = merge_requests(&[local.clone()], &remote, &last_synced).unwrap();
 
-        assert_eq!(merge.library.len(), 2);
+        assert_eq!(merge.requests.len(), 2);
         assert!(
             merge
-                .library
+                .requests
                 .iter()
                 .any(|request| request.id == id && request.json_body == local.json_body)
         );
         assert!(
             merge
-                .library
+                .requests
                 .iter()
                 .any(|request| request.id != id && request.json_body == remote_request.json_body)
         );
@@ -1344,9 +1687,9 @@ mod tests {
         let local = sample_request(id, "Local", r#"{"ok":true}"#);
         let last_synced = BTreeMap::from([(id, request_hash(&local).unwrap())]);
 
-        let merge = merge_libraries(&[local.clone()], &BTreeMap::new(), &last_synced).unwrap();
+        let merge = merge_requests(&[local.clone()], &BTreeMap::new(), &last_synced).unwrap();
 
-        assert_eq!(merge.library, vec![local]);
+        assert_eq!(merge.requests, vec![local]);
         assert!(merge.upload_ids.contains(&id));
         assert!(merge.warning.unwrap().contains("missing"));
     }

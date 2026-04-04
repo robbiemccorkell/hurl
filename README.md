@@ -42,7 +42,8 @@ You can also download the appropriate archive for your platform from the GitHub 
 
 - Create requests with an optional title, HTTP method, URL, headers, and JSON request body
 - Save requests into a local library
-- Browse saved requests in the library pane
+- Browse saved requests and folders in the library pane
+- Create folders and move saved items between folders
 - Load and submit saved requests
 - View status code, response time, response headers, and response body
 - Optionally sync the saved request library through a user-owned private GitHub repo with client-side encryption
@@ -103,7 +104,7 @@ The interface is split into three main panes:
 ```text
 +----------------------+---------------------------------------------+
 | Library              | Request                                     |
-| saved requests       | title / method / url / headers / JSON body |
+| folders / requests   | title / method / url / headers / JSON body |
 +----------------------+---------------------------------------------+
 | Response                                                           |
 | status / time / headers / body                                     |
@@ -121,15 +122,26 @@ The interface is split into three main panes:
 5. Press `Esc` to leave edit mode.
 6. Press `Ctrl+S` to save the request to the library.
 
+If you are currently inside a folder in the `Library` pane, the new request is saved into that folder.
+
 ### Submit a Saved Request
 
 1. Press `Esc` if you are currently editing.
 2. Press `Tab` until focus is on `Library`.
-3. Use `Up` / `Down` to highlight a saved request.
-4. Press `Enter` to load it into the editor.
-5. Press `Ctrl+R` to send it.
+3. Use `Up` / `Down` to highlight a saved request or folder.
+4. Press `Enter` on a folder to open it, or `Enter` on a saved request to load it into the editor.
+5. Press `Left` or `Backspace` to move back to the parent folder.
+6. Press `Ctrl+R` to send the loaded request.
 
 The response appears in the bottom-right `Response` pane.
+
+### Organize Requests into Folders
+
+1. Press `Tab` until focus is on `Library`.
+2. Press `f` to create a folder in the current library location.
+3. Use `Enter` to open folders and `Left` or `Backspace` to move back up.
+4. Highlight an existing request or folder and press `x` to cut it.
+5. Navigate to the destination folder and press `p` to paste it there.
 
 ### Configure Sync
 
@@ -150,10 +162,14 @@ The response appears in the bottom-right `Response` pane.
 | --- | --- |
 | `Tab` / `Shift+Tab` | Cycle focus between panes |
 | `Up` / `Down` | Move through library items, request fields, or response scroll |
-| `Left` / `Right` | Move between adjacent request fields or settings areas where applicable |
-| `Enter` | Load a library item or enter edit mode for the selected request field |
+| `Left` / `Right` | Move between adjacent request fields, navigate up from a folder, or switch response tabs where applicable |
+| `Backspace` | Move to the parent folder in the library pane |
+| `Enter` | Open a folder, load a request, or enter edit mode for the selected request field |
 | `Esc` | Leave edit mode, or close `Settings` when not editing |
 | `n` | Create a new request draft |
+| `f` | Create a folder in the current library location |
+| `x` | Cut the selected library item for moving |
+| `p` | Paste the cut library item into the current folder |
 | `g` | Open or close `Settings` |
 | `Ctrl+V` | Paste from clipboard into the active request text field |
 | `Ctrl+S` | Save the current request |
