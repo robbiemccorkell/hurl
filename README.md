@@ -22,6 +22,12 @@ Install `hurl` using one of the methods below, then launch it from your terminal
 hurl
 ```
 
+Or explore the built-in demo mode:
+
+```bash
+hurl demo
+```
+
 For CLI help and metadata:
 
 ```bash
@@ -85,6 +91,15 @@ hurl help update
 hurl version
 ```
 
+### Demo Mode
+
+```bash
+hurl demo
+```
+
+This launches an isolated demo library backed by public test APIs.
+Changes made in demo mode only last for the current session, and GitHub sync is disabled.
+
 ## Features
 
 - Create requests with an optional title, HTTP method, URL, headers, and JSON request body
@@ -92,6 +107,7 @@ hurl version
 - Browse saved requests and folders in the library pane
 - Create folders and move saved items between folders
 - Load and submit saved requests
+- Launch an isolated demo mode with a built-in sample library and public test APIs
 - View status code, response time, response headers, and response body
 - Optionally sync the saved request library through a user-owned private GitHub repo with client-side encryption
 
@@ -163,6 +179,7 @@ The interface is split into three main panes:
 ### CLI
 
 - Run `hurl` with no arguments to launch the TUI.
+- Run `hurl demo` to launch an isolated demo library backed by public test APIs.
 - Run `hurl --help` or `hurl help` to see available commands.
 - Run `hurl --version` or `hurl version` to print the version.
 - Run `hurl update` to update an installer-managed copy when supported.

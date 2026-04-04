@@ -13,6 +13,7 @@ const GITHUB_TOKEN_ENV: &str = "HURL_GITHUB_TOKEN";
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum Command {
     RunTui,
+    Demo,
     Help,
     Version,
     Update,
@@ -24,6 +25,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     match command {
         Command::RunTui => app::run().await,
+        Command::Demo => app::run_demo().await,
         Command::Help => {
             print_help();
             Ok(())
@@ -51,6 +53,7 @@ where
 
     let command = match args.as_slice() {
         [] => Command::RunTui,
+        [arg] if arg == "demo" => Command::Demo,
         [arg] if matches!(arg.as_str(), "help" | "--help" | "-h") => Command::Help,
         [arg] if matches!(arg.as_str(), "version" | "--version" | "-V") => Command::Version,
         [arg] if arg == "update" => Command::Update,
@@ -121,10 +124,12 @@ A terminal UI API client for humans.
 
 Usage:
   hurl
+  hurl demo
   hurl <command>
 
 Commands:
   help       Show help for hurl or a subcommand
+  demo       Launch the built-in demo library against public test APIs
   version    Show the hurl version
   update     Update hurl when this install supports it
 
@@ -133,6 +138,7 @@ Flags:
   -V, --version    Show version
 
 Running `hurl` without a command launches the TUI.
+Run `hurl demo` to explore an isolated demo workspace.
 Repository: {APP_REPOSITORY}"
     );
 }
@@ -221,6 +227,11 @@ mod tests {
     #[test]
     fn parses_update_command() {
         assert_eq!(parse(&["update"]), Command::Update);
+    }
+
+    #[test]
+    fn parses_demo_command() {
+        assert_eq!(parse(&["demo"]), Command::Demo);
     }
 
     #[test]

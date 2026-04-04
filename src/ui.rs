@@ -47,9 +47,10 @@ pub fn restore_terminal() -> io::Result<()> {
 }
 
 pub fn draw(frame: &mut Frame<'_>, app: &AppState) {
+    let top_bar_height = if app.is_demo_mode() { 2 } else { 1 };
     let layout = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Min(0)])
+        .constraints([Constraint::Length(top_bar_height), Constraint::Min(0)])
         .split(frame.area());
 
     render_top_bar(frame, layout[0], app);
@@ -80,14 +81,36 @@ fn render_top_bar(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
         ),
     ];
 
-    for control in controls_for_screen(app.screen) {
+    for control in controls_for_screen(app.screen, app.is_demo_mode()) {
         spans.push(Span::raw(" | "));
         spans.push(Span::styled(*control, Style::default().fg(TEXT_MUTED)));
     }
 
-    let line = Line::from(spans);
+    let rows = if app.is_demo_mode() {
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(1), Constraint::Length(1)])
+            .split(area)
+    } else {
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(1)])
+            .split(area)
+    };
 
-    frame.render_widget(Paragraph::new(line), area);
+    frame.render_widget(Paragraph::new(Line::from(spans)), rows[0]);
+
+    if let Some(banner) = app.demo_banner_text() {
+        frame.render_widget(
+            Paragraph::new(banner).style(
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(ACCENT_AMBER)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            rows[1],
+        );
+    }
 }
 
 fn render_main_screen(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
@@ -1045,8 +1068,19 @@ fn centered_rect(area: Rect, width_percent: u16, height: u16) -> Rect {
     horizontal[1]
 }
 
-fn controls_for_screen(screen: Screen) -> &'static [&'static str] {
+fn controls_for_screen(screen: Screen, demo_mode: bool) -> &'static [&'static str] {
     match screen {
+        Screen::Main if demo_mode => &[
+            "Tab Panes",
+            "Enter Edit/Load",
+            "f Folder",
+            "x/p Move",
+            "Ctrl+V Paste",
+            "Ctrl+S Save",
+            "Ctrl+R Send",
+            "n New",
+            "q Quit",
+        ],
         Screen::Main => &[
             "g Settings",
             "Tab Panes",

@@ -1,4 +1,5 @@
 use crate::config;
+use crate::demo;
 use crate::events::{AppEvent, AppEventReceiver, AppEventSender, SyncOperation, event_channel};
 use crate::model::{
     HeaderEntry, HttpMethod, LibraryData, LibraryFile, RequestInput, ResponseData, ResponseTrace,
@@ -40,8 +41,25 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let sync_path = storage::sync_path()?;
     let library = storage::load_library(&path)?;
     let sync_file = storage::load_sync_file(&sync_path)?;
+    run_app(AppState::new(path, sync_path, library, sync_file)).await
+}
+
+pub async fn run_demo() -> Result<(), Box<dyn std::error::Error>> {
+    let session = demo::DemoSession::start()?;
+    let result = run_app(AppState::new_demo(
+        session.storage_path.clone(),
+        session.sync_path.clone(),
+        session.library.clone(),
+        session.sync_file.clone(),
+        session.default_request_id,
+    ))
+    .await;
+    drop(session);
+    result
+}
+
+async fn run_app(mut app: AppState) -> Result<(), Box<dyn std::error::Error>> {
     let (sender, receiver) = event_channel();
-    let mut app = AppState::new(path, sync_path, library, sync_file);
     let mut terminal = ui::setup_terminal()?;
 
     app.schedule_startup_sync();
@@ -430,6 +448,7 @@ pub struct AppState {
     pub status: StatusMessage,
     pub request_in_flight: bool,
     pub should_quit: bool,
+    demo_mode: bool,
     storage_path: PathBuf,
     sync_path: PathBuf,
     library_revision: u64,
@@ -442,6 +461,32 @@ impl AppState {
         sync_path: PathBuf,
         library: LibraryFile,
         sync_file: SyncFile,
+    ) -> Self {
+        Self::build(storage_path, sync_path, library, sync_file, false)
+    }
+
+    pub fn new_demo(
+        storage_path: PathBuf,
+        sync_path: PathBuf,
+        library: LibraryFile,
+        sync_file: SyncFile,
+        default_request_id: Uuid,
+    ) -> Self {
+        let mut state = Self::build(storage_path, sync_path, library, sync_file, true);
+        let _ = state.select_request_by_id(default_request_id);
+        state.focus = Pane::Library;
+        state.status = StatusMessage::info(
+            "Demo mode is session-only, uses public test APIs, and disables sync.",
+        );
+        state
+    }
+
+    fn build(
+        storage_path: PathBuf,
+        sync_path: PathBuf,
+        library: LibraryFile,
+        sync_file: SyncFile,
+        demo_mode: bool,
     ) -> Self {
         let library = LibraryData::from(library).normalized();
         let selected_library_item = first_library_item(&library, None);
@@ -501,6 +546,7 @@ impl AppState {
             status: StatusMessage::info("Ready."),
             request_in_flight: false,
             should_quit: false,
+            demo_mode,
             storage_path,
             sync_path,
             library_revision: 0,
@@ -833,8 +879,13 @@ impl AppState {
 
     fn handle_global_shortcuts(&mut self, key: KeyEvent, sender: &AppEventSender) -> bool {
         if matches!(key.code, KeyCode::Char('g')) && !self.any_text_editing() {
-            self.toggle_settings_screen();
-            return true;
+            return match self.screen {
+                Screen::Main if self.demo_mode => false,
+                Screen::Main | Screen::Settings => {
+                    self.toggle_settings_screen();
+                    true
+                }
+            };
         }
 
         if matches!(key.code, KeyCode::Char('q')) && !self.any_text_editing() {
@@ -847,7 +898,13 @@ impl AppState {
                 if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('s') {
                     match self.save_current_request() {
                         Ok(created_new) => {
-                            let message = if created_new {
+                            let message = if self.demo_mode {
+                                if created_new {
+                                    "Saved demo request for this session."
+                                } else {
+                                    "Updated demo request for this session."
+                                }
+                            } else if created_new {
                                 "Saved request to the library."
                             } else {
                                 "Updated saved request."
@@ -1341,6 +1398,9 @@ impl AppState {
     }
 
     fn is_sync_enabled(&self) -> bool {
+        if self.demo_mode {
+            return false;
+        }
         self.sync
             .file
             .config
@@ -1427,11 +1487,17 @@ impl AppState {
     }
 
     fn persist_library(&self) -> Result<(), String> {
+        if self.demo_mode {
+            return Ok(());
+        }
         storage::save_library(&self.storage_path, &LibraryFile::from(self.library.clone()))
             .map_err(|error| error.to_string())
     }
 
     fn persist_sync_file(&self) -> Result<(), String> {
+        if self.demo_mode {
+            return Ok(());
+        }
         storage::save_sync_file(&self.sync_path, &self.sync.file).map_err(|error| error.to_string())
     }
 
@@ -1524,6 +1590,17 @@ impl AppState {
 
         self.current_folder_id = self.sanitize_folder_reference(request.folder_id);
         self.selected_library_item = Some(LibraryItemKey::Request(id));
+        self.draft = RequestEditor::from_saved_request(&request);
+        true
+    }
+
+    fn select_request_by_id(&mut self, request_id: Uuid) -> bool {
+        let Some(request) = self.request_by_id(request_id).cloned() else {
+            return false;
+        };
+
+        self.current_folder_id = self.sanitize_folder_reference(request.folder_id);
+        self.selected_library_item = Some(LibraryItemKey::Request(request_id));
         self.draft = RequestEditor::from_saved_request(&request);
         true
     }
@@ -1981,6 +2058,15 @@ impl AppState {
         self.sync.status.label()
     }
 
+    pub fn is_demo_mode(&self) -> bool {
+        self.demo_mode
+    }
+
+    pub fn demo_banner_text(&self) -> Option<&'static str> {
+        self.demo_mode
+            .then_some(" DEMO MODE  Changes are not saved ")
+    }
+
     pub fn sync_enabled(&self) -> bool {
         self.is_sync_enabled()
     }
@@ -2308,6 +2394,22 @@ mod tests {
         )
     }
 
+    fn demo_app_with_library() -> AppState {
+        let dir = tempdir().unwrap();
+        let request = sample_request();
+        AppState::new_demo(
+            dir.path().join("library.json"),
+            dir.path().join("sync.json"),
+            LibraryFile {
+                version: crate::model::CURRENT_LIBRARY_VERSION,
+                folders: vec![],
+                requests: vec![request.clone()],
+            },
+            SyncFile::default(),
+            request.id,
+        )
+    }
+
     #[test]
     fn loads_selected_request_into_draft() {
         let dir = tempdir().unwrap();
@@ -2591,6 +2693,97 @@ mod tests {
             &sender,
         );
         assert_eq!(app.settings.focus, SettingsFocus::Nav);
+    }
+
+    #[test]
+    fn demo_mode_ignores_settings_shortcut_but_allows_request_editing() {
+        let (sender, _receiver) = event_channel();
+        let mut app = demo_app_with_library();
+        app.focus = Pane::Request;
+        app.request_field = RequestField::Body;
+        let initial_status = app.status.message.clone();
+
+        app.handle_key_event(
+            KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE),
+            &sender,
+        );
+        assert_eq!(app.screen, Screen::Main);
+        assert_eq!(app.status.message, initial_status);
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &sender);
+        assert!(app.request_editing);
+    }
+
+    #[test]
+    fn demo_mode_disables_sync_and_keeps_edits_in_memory_only() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("library.json");
+        let request = sample_request();
+        let sync_file = SyncFile {
+            version: crate::sync::SYNC_FILE_VERSION,
+            config: Some(SyncConfig {
+                enabled: true,
+                owner: "demo".to_string(),
+                repo: "demo-sync".to_string(),
+                branch: "main".to_string(),
+                github_user: "demo".to_string(),
+                device_id: Uuid::new_v4(),
+            }),
+            state: Default::default(),
+        };
+        let mut app = AppState::new_demo(
+            path.clone(),
+            dir.path().join("sync.json"),
+            LibraryFile {
+                version: crate::model::CURRENT_LIBRARY_VERSION,
+                folders: vec![],
+                requests: vec![request.clone()],
+            },
+            sync_file,
+            request.id,
+        );
+
+        assert!(!app.sync_enabled());
+
+        app.draft.set_title("Updated in Demo");
+        app.save_current_request().unwrap();
+
+        assert_eq!(
+            app.request_by_id(request.id).unwrap().title.as_deref(),
+            Some("Updated in Demo")
+        );
+        assert!(storage::load_library(&path).unwrap().requests.is_empty());
+    }
+
+    #[test]
+    fn demo_mode_allows_creating_new_requests_without_persisting() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("library.json");
+        let request = sample_request();
+        let mut app = AppState::new_demo(
+            path.clone(),
+            dir.path().join("sync.json"),
+            LibraryFile {
+                version: crate::model::CURRENT_LIBRARY_VERSION,
+                folders: vec![],
+                requests: vec![request.clone()],
+            },
+            SyncFile::default(),
+            request.id,
+        );
+
+        app.new_request();
+        app.draft.set_title("Create in Demo");
+        app.draft.method = HttpMethod::Post;
+        app.draft.set_url("https://postman-echo.com/post");
+        app.draft
+            .set_headers("Accept: application/json\nContent-Type: application/json");
+        app.draft.set_body(r#"{"demo":true}"#);
+        let created_new = app.save_current_request().unwrap();
+
+        assert!(created_new);
+        assert_eq!(app.library.requests.len(), 2);
+        assert!(storage::load_library(&path).unwrap().requests.is_empty());
     }
 
     #[test]

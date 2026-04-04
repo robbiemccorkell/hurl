@@ -1,0 +1,164 @@
+{
+  "version": 2,
+  "folders": [
+    {
+      "id": "79cc0e48-9e84-4fb4-840c-f6af3b242101",
+      "name": "Postman Echo",
+      "parent_id": null
+    },
+    {
+      "id": "3280564c-95ff-4ed4-8b23-90b5d12e1120",
+      "name": "httpbin",
+      "parent_id": null
+    },
+    {
+      "id": "3024a458-6f94-48a2-9856-cfaf96086144",
+      "name": "Utilities",
+      "parent_id": "3280564c-95ff-4ed4-8b23-90b5d12e1120"
+    }
+  ],
+  "requests": [
+    {
+      "id": "5f8d0f16-1c8d-4d17-8b5a-b0b58bf02b52",
+      "folder_id": null,
+      "title": "Delayed Response",
+      "method": "Get",
+      "url": "https://httpbin.org/delay/2?source=hurl-demo",
+      "headers": [
+        {
+          "name": "Accept",
+          "value": "application/json"
+        }
+      ],
+      "json_body": "{}"
+    },
+    {
+      "id": "438585de-a774-4241-aef0-5e4877105514",
+      "folder_id": null,
+      "title": "Echo Headers",
+      "method": "Get",
+      "url": "https://postman-echo.com/headers",
+      "headers": [
+        {
+          "name": "Accept",
+          "value": "application/json"
+        },
+        {
+          "name": "X-Hurl-Demo",
+          "value": "read-only"
+        }
+      ],
+      "json_body": "{}"
+    },
+    {
+      "id": "8bb926aa-d344-4bd7-ab70-16dd4f1e9241",
+      "folder_id": "79cc0e48-9e84-4fb4-840c-f6af3b242101",
+      "title": "Query Parameters",
+      "method": "Get",
+      "url": "https://postman-echo.com/get?tag=hurl-demo&limit=3&folder=postman",
+      "headers": [
+        {
+          "name": "Accept",
+          "value": "application/json"
+        }
+      ],
+      "json_body": "{}"
+    },
+    {
+      "id": "9d9c36e0-3b7a-4021-9fe1-7f5fc8276114",
+      "folder_id": "79cc0e48-9e84-4fb4-840c-f6af3b242101",
+      "title": "Create Note",
+      "method": "Post",
+      "url": "https://postman-echo.com/post",
+      "headers": [
+        {
+          "name": "Accept",
+          "value": "application/json"
+        },
+        {
+          "name": "Content-Type",
+          "value": "application/json"
+        }
+      ],
+      "json_body": "{\n  \"title\": \"Ralph release note\",\n  \"status\": \"draft\",\n  \"tags\": [\n    \"demo\",\n    \"read-only\"\n  ]\n}"
+    },
+    {
+      "id": "3d071a8a-f0ae-46cb-92d8-c1f5415d4a6d",
+      "folder_id": "79cc0e48-9e84-4fb4-840c-f6af3b242101",
+      "title": "Patch Note",
+      "method": "Patch",
+      "url": "https://postman-echo.com/patch",
+      "headers": [
+        {
+          "name": "Accept",
+          "value": "application/json"
+        },
+        {
+          "name": "Content-Type",
+          "value": "application/json"
+        }
+      ],
+      "json_body": "{\n  \"status\": \"published\",\n  \"featured\": true\n}"
+    },
+    {
+      "id": "0f70213b-59d6-4ba4-a4fa-cd8c76594dab",
+      "folder_id": "79cc0e48-9e84-4fb4-840c-f6af3b242101",
+      "title": "Delete Note",
+      "method": "Delete",
+      "url": "https://postman-echo.com/delete",
+      "headers": [
+        {
+          "name": "Accept",
+          "value": "application/json"
+        }
+      ],
+      "json_body": "{}"
+    },
+    {
+      "id": "b23c3175-eeab-4696-a556-966c871af8da",
+      "folder_id": "3280564c-95ff-4ed4-8b23-90b5d12e1120",
+      "title": "Request UUID",
+      "method": "Get",
+      "url": "https://httpbin.org/uuid",
+      "headers": [
+        {
+          "name": "Accept",
+          "value": "application/json"
+        }
+      ],
+      "json_body": "{}"
+    },
+    {
+      "id": "2cf5d60b-b4ae-4638-b1c5-d52b9e1ed405",
+      "folder_id": "3024a458-6f94-48a2-9856-cfaf96086144",
+      "title": "Response Headers",
+      "method": "Get",
+      "url": "https://httpbin.org/response-headers?x-demo-mode=read-only&cache-control=no-store",
+      "headers": [
+        {
+          "name": "Accept",
+          "value": "application/json"
+        }
+      ],
+      "json_body": "{}"
+    },
+    {
+      "id": "7d5ad6b8-c40f-4be6-93b7-bf01cc475f3e",
+      "folder_id": "3024a458-6f94-48a2-9856-cfaf96086144",
+      "title": "Anything Echo",
+      "method": "Post",
+      "url": "https://httpbin.org/anything/hurl-demo",
+      "headers": [
+        {
+          "name": "Accept",
+          "value": "application/json"
+        },
+        {
+          "name": "Content-Type",
+          "value": "application/json"
+        }
+      ],
+      "json_body": "{\n  \"request\": \"demo\",\n  \"source\": \"hurl\",\n  \"notes\": [\n    \"public endpoint\",\n    \"safe for screenshots\"\n  ]\n}"
+    }
+  ]
+}
