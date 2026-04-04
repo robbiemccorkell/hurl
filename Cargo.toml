@@ -6,6 +6,7 @@ description = "A terminal UI API client for humans"
 homepage = "https://github.com/robbiemccorkell/hurl"
 repository = "https://github.com/robbiemccorkell/hurl"
 readme = "README.md"
+license = "MIT"
 
 [dependencies]
 anyhow = "1.0"

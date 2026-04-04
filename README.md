@@ -276,3 +276,7 @@ To run the test suite:
 ```bash
 cargo test
 ```
+
+## License
+
+MIT. See [LICENSE](/home/robbiemccorkell/Developer/robbiemccorkell/hurl/LICENSE).
