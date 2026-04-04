@@ -10,9 +10,13 @@
   </a>
 </p>
 
-<p align="center"><strong><code>hurl</code> is a terminal UI API client for humans.</strong></p>
+<p align="center"><strong><code>hurl</code> - [h]uman c[url]</strong></p>
 
-It is a Rust project that aims to feel like a lightweight, keyboard-driven Postman for the terminal, focused on creating, saving, and sending JSON-oriented HTTP requests from a TUI.
+`hurl` is a lightweight TUI for storing and triggering common API requests. It syncs your library via an encrypted private GitHub repo.
+
+<p align="center">
+  <img src="docs/demo.png" alt="hurl demo screenshot" width="960">
+</p>
 
 ## Getting Started
 
