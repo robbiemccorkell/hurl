@@ -12,6 +12,13 @@ Install `hurl` using one of the methods below, then launch it from your terminal
 hurl
 ```
 
+For CLI help and metadata:
+
+```bash
+hurl --help
+hurl --version
+```
+
 ## Installation
 
 Prebuilt binaries are intended to be published through GitHub Releases, installer scripts, and Homebrew.
@@ -37,6 +44,36 @@ powershell -ExecutionPolicy Bypass -c "irm https://github.com/robbiemccorkell/hu
 ### Manual Download
 
 You can also download the appropriate archive for your platform from the GitHub Releases page.
+
+## Updating
+
+### Homebrew
+
+```bash
+brew upgrade hurl
+```
+
+### Shell / PowerShell Installer
+
+If your installed copy supports in-place updates, run:
+
+```bash
+hurl update
+```
+
+The release installers also install a standalone updater command:
+
+```bash
+hurl-update
+```
+
+### Help and Version
+
+```bash
+hurl help
+hurl help update
+hurl version
+```
 
 ## Features
 
@@ -112,6 +149,13 @@ The interface is split into three main panes:
 ```
 
 ## How To Use
+
+### CLI
+
+- Run `hurl` with no arguments to launch the TUI.
+- Run `hurl --help` or `hurl help` to see available commands.
+- Run `hurl --version` or `hurl version` to print the version.
+- Run `hurl update` to update an installer-managed copy when supported.
 
 ### Create a Request
 

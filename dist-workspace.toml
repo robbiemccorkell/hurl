@@ -18,7 +18,7 @@ install-path = "CARGO_HOME"
 # Where to host releases
 hosting = "github"
 # Whether to install an updater program
-install-updater = false
+install-updater = true
 # Source tarballs aren't part of the curated GitHub release asset set.
 source-tarball = false
 # A GitHub repo to push Homebrew formulas to
