@@ -1,16 +1,16 @@
 <h1 align="center">hurl</h1>
 
 <p align="center">
-  <img src="docs/ralph-icon.png" alt="Ralph mascot" width="180">
+  <img src="docs/ralph-icon.png" alt="Ralph" title="Ralph" width="180">
 </p>
 
 <p align="center">
+  <strong><code>hurl</code> - [h]uman c[url]</strong>
+  &nbsp;
   <a href="https://github.com/robbiemccorkell/hurl/actions/workflows/on-push.yml">
     <img src="https://github.com/robbiemccorkell/hurl/actions/workflows/on-push.yml/badge.svg?branch=main" alt="Test status">
   </a>
 </p>
-
-<p align="center"><strong><code>hurl</code> - [h]uman c[url]</strong></p>
 
 `hurl` is a lightweight TUI for storing and triggering common API requests. It syncs your library via an encrypted private GitHub repo.
 
